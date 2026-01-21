@@ -5,10 +5,41 @@
 #include <cstdint>
 #include <string>
 
+#define UNUSED(expr) \
+do {               \
+(void)(expr);    \
+} while (0)
+
+namespace model {
+enum class ModelBufferType {
+    kInputTokens = 0,
+    kInputEmbeddings = 1,
+    kOutputRMSNorm = 2,
+    kKeyCache = 3,
+    kValueCache = 4,
+    kQuery = 5,
+    kInputPos = 6,
+    kScoreStorage = 7,
+    kOutputMHA = 8,
+    kAttnOutput = 9,
+    kW1Output = 10,
+    kW2Output = 11,
+    kW3Output = 12,
+    kFFNRMSNorm = 13,
+    kForwardOutput = 15,
+    kForwardOutputCPU = 16,
+
+    kSinCache = 17,
+    kCosCache = 18,
+  };
+}
+
+
 namespace base {
 enum class DeviceType : uint8_t {
     kDeviceUnknown = 0,
     kDeviceCPU = 1,
+    kDeviceCUDA = 2,
 };
 
 enum class DataType : uint8_t {
@@ -55,6 +86,12 @@ enum StatusCode : uint8_t {
     kKeyValueHasExist = 6,
     kInvalidArgument = 7,
 };
+
+enum class TokenizerType {
+    kEncodeUnknown = -1,
+    kEncodeSpe = 0,
+    kEncodeBpe = 1,
+  };
 
 class Status {
    public:
