@@ -1,3 +1,5 @@
+#include <glog/logging.h>
+#include <cstdlib>
 #include "base/alloc.h"
 
 #if (defined(_POSIX_ADVISORY_INFO) && (_POSIX_ADVISORY_INFO >= 200112L))
@@ -15,9 +17,9 @@ void* CPUDeviceAllocator::allocate(size_t byte_size) const {
 #ifdef KUIPER_HAVE_POSIX_MEMALIGN
     void* data = nullptr;
     const size_t alignment = (byte_size >= size_t(1024)) ? size_t(32) : size_t(16);
-    int status = posix_memalign(
-        (void**)&data, ((alignment >= sizeof(void*)) ? alignment : sizeof(void*)),
-        byte_size);
+    int status = posix_memalign((void**)&data,
+                                ((alignment >= sizeof(void*)) ? alignment : sizeof(void*)),
+                                byte_size);
     if (status != 0) {
         return nullptr;
     }
@@ -34,15 +36,5 @@ void CPUDeviceAllocator::release(void* ptr) const {
     }
 }
 
-void CPUDeviceAllocator::memcpy(const void* src_ptr, void* dest_ptr, size_t size) const {
-    CHECK_NE(src_ptr, nullptr);
-    CHECK_NE(dest_ptr, nullptr);
-    if (!size) {
-        return;
-    }
-    std::memcpy(dest_ptr, src_ptr, size);
-}
-
 std::shared_ptr<CPUDeviceAllocator> CPUDeviceAllocatorFactory::instance = nullptr;
-
 }  // namespace base
