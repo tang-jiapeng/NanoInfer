@@ -25,13 +25,16 @@ class Tensor {
                     bool need_alloc = false,
                     std::shared_ptr<base::DeviceAllocator> alloc = nullptr,
                     void* ptr = nullptr);
+
     explicit Tensor(base::DataType data_type, int32_t dim0, int32_t dim1, int32_t dim2,
                     int32_t dim3, bool need_alloc = false,
                     std::shared_ptr<base::DeviceAllocator> alloc = nullptr,
                     void* ptr = nullptr);
 
-    explicit Tensor(base::DataType data_type, std::vector<int32_t> dims, bool need_alloc = false,
-                    std::shared_ptr<base::DeviceAllocator> alloc = nullptr, void* ptr = nullptr);
+    explicit Tensor(base::DataType data_type, std::vector<int32_t> dims,
+                    bool need_alloc = false,
+                    std::shared_ptr<base::DeviceAllocator> alloc = nullptr,
+                    void* ptr = nullptr);
 
     void to_cpu();
 
@@ -39,8 +42,8 @@ class Tensor {
 
     bool is_empty() const;
 
-    void init_buffer(std::shared_ptr<base::DeviceAllocator> alloc, base::DataType data_type,
-                 bool need_alloc, void* ptr);
+    void init_buffer(std::shared_ptr<base::DeviceAllocator> alloc,
+                     base::DataType data_type, bool need_alloc, void* ptr);
 
     template <typename T>
     T* ptr();
@@ -70,7 +73,7 @@ class Tensor {
 
     void reset(base::DataType data_type, const std::vector<int32_t>& dims);
 
-    void set_device_type(base::DeviceType device_type);
+    void set_device_type(base::DeviceType device_type) const;
 
     base::DeviceType device_type() const;
 
