@@ -173,7 +173,7 @@ namespace error {
 /**
  * @brief 状态检查宏
  *
- * 检查函数调用的返回值 (Status)。
+ * 检查函数调用的返回值 (Status)
  * 如果状态不是 Success，则打印错误日志 (包括文件名、行号、错误码和信息) 并终止程序
  * (LOG(FATAL))
  */

@@ -55,9 +55,9 @@ base::Status RmsNormLayer::forward() {
         kernel::get_rmsnorm_kernel(device_type_)(
             input, weight, output, cuda_config_ ? cuda_config_->stream : nullptr);
     } else {
-        // kernel::get_rmsnorm_dim_kernel(device_type_)(input, weight, output, dim_,
-        //                                              cuda_config_ ?
-        //                                              cuda_config_->stream : nullptr);
+        kernel::get_rmsnorm_dim_kernel(device_type_)(input, weight, output, dim_,
+                                                     cuda_config_ ?
+                                                     cuda_config_->stream : nullptr);
     }
 
     return base::error::Success();
