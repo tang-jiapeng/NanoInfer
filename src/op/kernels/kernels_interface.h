@@ -120,10 +120,10 @@ typedef void (*RoPEKernel)(int32_t dim, int32_t kv_dim, int32_t head_size,
 typedef void (*ScaleKernel)(float scale, const tensor::Tensor& input, void* stream);
 
 /**
- * @brief Softmax (In-place) Kernel 协议
+ * @brief Softmax Kernel 协议
  * Input = Softmax(Input)
  */
-typedef void (*SoftmaxInplaceKernel)(const tensor::Tensor& input, void* stream);
+typedef void (*SoftmaxKernel)(const tensor::Tensor& input, void* stream);
 
 /**
  * @brief 缩放累加 Kernel 协议
@@ -137,11 +137,6 @@ typedef void (*ScaleSumKernel)(const tensor::Tensor& value, const tensor::Tensor
                                const tensor::Tensor& output, int t, int size, int stride,
                                void* stream);
 
-/**
- * @brief CPU 端辅助函数：原地 Softmax
- */
-void softmax_inplace_cpu(const float* input_ptr, size_t size);
-
 // -----------------------------------------------------------------------
 // 工厂函数声明 (Factory Functions)
 // 根据设备类型 (CPU/CUDA) 返回对应的 Kernel 函数指针
@@ -149,7 +144,7 @@ void softmax_inplace_cpu(const float* input_ptr, size_t size);
 
 AddKernel get_add_kernel(base::DeviceType device_type);
 
-EmbeddingKernel get_emb_kernel(base::DeviceType device_type);
+EmbeddingKernel get_embedding_kernel(base::DeviceType device_type);
 
 MatmulKernel get_matmul_kernel(base::DeviceType device_type);
 
@@ -163,7 +158,7 @@ RoPEKernel get_rope_kernel(base::DeviceType device_type);
 
 ScaleKernel get_scale_kernel(base::DeviceType device_type);
 
-SoftmaxInplaceKernel get_softmax_kernel(base::DeviceType device_type);
+SoftmaxKernel get_softmax_kernel(base::DeviceType device_type);
 
 SwigluKernel get_swiglu_kernel(base::DeviceType device_type, void* stream = nullptr);
 

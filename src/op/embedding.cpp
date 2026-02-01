@@ -53,7 +53,7 @@ base::Status EmbeddingLayer::forward() {
     if (device_type_ == base::DeviceType::kDeviceCUDA) {
         CHECK(cuda_config_ != nullptr);
     }
-    kernel::get_emb_kernel(device_type_)(get_input(0), get_weight(0), get_output(0),
+    kernel::get_embedding_kernel(device_type_)(get_input(0), get_weight(0), get_output(0),
                                          vocab_size_,
                                          cuda_config_ ? cuda_config_->stream : nullptr);
     return base::StatusCode::kSuccess;
