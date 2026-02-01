@@ -88,6 +88,13 @@ find_package(GTest REQUIRED)
 find_package(glog REQUIRED)
 find_package(Armadillo REQUIRED)
 
+find_package(OpenMP REQUIRED)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    # -march=native 会自动开启 AVX512
+    # -ffast-math 允许编译器对浮点运算做更激进的优化
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native -O3 -fopenmp -ffast-math")
+endif()
+
 aux_source_directory(src/tensor/ DIR_TENSOR)
 aux_source_directory(src/base/ DIR_BASE)
 aux_source_directory(src/op/ DIR_OP)
@@ -100,7 +107,7 @@ aux_source_directory(src/sampler DIR_SAMPLE)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/lib)
 
 add_library(llama SHARED ${DIR_TENSOR} ${DIR_BASE} ${DIR_OP} ${DIR_KERNEL} ${DIR_MODEL} ${DIR_KERNEL_CPU} ${DIR_KERNEL_CUDA} ${DIR_KERNEL} ${DIR_SAMPLE})
-target_link_libraries(llama sentencepiece glog::glog gtest gtest_main pthread cudart armadillo)
+target_link_libraries(llama sentencepiece glog::glog gtest gtest_main pthread cudart armadillo OpenMP::OpenMP_CXX)
 target_link_directories(llama PUBLIC ${CMAKE_CUDA_COMPILER_LIBRARY_ROOT}/lib64)
 
 target_include_directories(llama PUBLIC ${glog_INCLUDE_DIR})

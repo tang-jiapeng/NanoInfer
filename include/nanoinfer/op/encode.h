@@ -64,7 +64,7 @@ class EncodeLayerBase : public Layer {
      */
     virtual int32_t vocab_size() const = 0;
 
-   private:
+   protected:
     bool has_bos_ = true;           ///< 是否添加 BOS
     bool has_eos_ = false;          ///< 是否添加 EOS
     std::string token_model_path_;  ///< 模型路径

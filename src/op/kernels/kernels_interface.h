@@ -160,7 +160,7 @@ ScaleKernel get_scale_kernel(base::DeviceType device_type);
 
 SoftmaxKernel get_softmax_kernel(base::DeviceType device_type);
 
-SwigluKernel get_swiglu_kernel(base::DeviceType device_type, void* stream = nullptr);
+SwigluKernel get_swiglu_kernel(base::DeviceType device_type);
 
 ScaleSumKernel get_scale_sum_kernel(base::DeviceType device_type);
 

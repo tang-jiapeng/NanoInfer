@@ -20,7 +20,7 @@ void embedding_kernel_cpu(const tensor::Tensor& input, const tensor::Tensor& wei
         } else {
             float* dest_ptr = const_cast<float*>(output.ptr<float>(i * weight_dim));
             float* src_ptr = const_cast<float*>(weight.ptr<float>(i * input_dim));
-            if (weight.device_type() == base::deviceType::kDeviceCPU) {
+            if (weight.device_type() == base::DeviceType::kDeviceCPU) {
                 allocator->memcpy(src_ptr, dest_ptr, weight_dim * sizeof(float),
                                   base::MemcpyKind::kMemcpyCPU2CPU);
             } else {

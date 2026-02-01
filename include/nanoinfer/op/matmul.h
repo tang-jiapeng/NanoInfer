@@ -54,7 +54,7 @@ class MatmulLayer : public LayerParam {
      * @param device_type 设备类型
      */
     base::Status set_bias(int32_t idx, int32_t& dims, const void* bias_ptr,
-                          base::DeviceType device_type) override;
+                          base::DeviceType device_type);
 
     /**
      * @brief 获取偏置 Tensor (可变)
