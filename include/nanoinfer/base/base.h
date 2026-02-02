@@ -122,11 +122,9 @@ class Status {
 
     operator int() const;
 
-    /**
-     * @brief 转换为布尔值
-     * @return true 表示成功 (kSuccess)，false 表示失败
-     */
     operator bool() const;
+
+    int32_t get_err_code() const;
 
     const std::string& get_err_msg() const;
 

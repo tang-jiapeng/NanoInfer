@@ -2,7 +2,6 @@
 #include <armadillo>
 
 namespace kernel {
-
 void scale_kernel_cpu(float scale, const tensor::Tensor& tensor, void* stream) {
     UNUSED(stream);
     CHECK(tensor.is_empty() == false);

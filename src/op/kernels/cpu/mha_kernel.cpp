@@ -1,7 +1,8 @@
 #include "mha_kernel.h"
+#include <cuda_runtime_api.h>
 #include "matmul_kernel.h"
 #include "scale_sum_kernel.h"
-#include "softmax.h"
+#include "softmax_kernel.h"
 
 namespace kernel {
 
@@ -45,7 +46,7 @@ void mha_kernel_cpu(int32_t pos, int32_t head_num, int32_t layer_index, int32_t 
         tensor::Tensor score_head_tensor(base::DataType::kDataTypeFp32, pos + 1, false,
                                          nullptr, score_head_addr);
         score_head_tensor.set_device_type(device_type);
-        softmax_kernel_cpu(score_head_tensor, config);
+        softmax_kernel_cpu(score_head_tensor, config ? config->stream : nullptr);
 
         float* output_head_ptr = const_cast<float*>(mha_out.ptr<float>()) + h * head_size;
         allocator->memset_zero(output_head_ptr, sizeof(float) * head_size,
@@ -60,7 +61,7 @@ void mha_kernel_cpu(int32_t pos, int32_t head_num, int32_t layer_index, int32_t 
         tensor::Tensor value_tensor(base::DataType::kDataTypeFp32, head_size, false,
                                     nullptr, value_head_addr);
         scale_sum_kernel_cpu(value_tensor, score_head_tensor, output_tensor, pos,
-                             head_size, kv_dim, config);
+                             head_size, kv_dim, config ? config->stream : nullptr);
     }
 }
 }  // namespace kernel

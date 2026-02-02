@@ -7,5 +7,4 @@ namespace kernel {
 void scale_kernel_cpu(float scale, const tensor::Tensor& tensor, void* stream = nullptr);
 
 }
-
-#endif  // NANO_INFER_SCALE_KERNEL_H
+#endif  // SCALE_KERNEL_H

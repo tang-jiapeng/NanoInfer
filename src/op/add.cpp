@@ -1,5 +1,4 @@
 #include "nanoinfer/op/add.h"
-#include "kernels/cuda/add_kernel.cuh"
 #include "kernels/kernels_interface.h"
 
 namespace op {

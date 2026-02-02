@@ -7,18 +7,21 @@
 #include "cpu/rope_kernel.h"
 #include "cpu/scale_kernel.h"
 #include "cpu/scale_sum_kernel.h"
-#include "cpu/softmax.h"
+#include "cpu/softmax_kernel.h"
 #include "cpu/swiglu_kernel.h"
-#include "cuda/add_kernel.cuh"
-#include "cuda/rmsnorm_kernel.cuh"
+// #include "cuda/add_kernel.cuh"
+// #include "cuda/emb_kernel.cuh"
+// #include "cuda/matmul_kernel.cuh"
+// #include "cuda/mha_kernel.cuh"
+// #include "cuda/rmsnorm_kernel.cuh"
+// #include "cuda/rope_kernel.cuh"
+// #include "cuda/swiglu_kernel.cuh"
 
 namespace kernel {
 AddKernel get_add_kernel(base::DeviceType device_type) {
     if (device_type == base::DeviceType::kDeviceCPU) {
         return add_kernel_cpu;
-    } else if (device_type == base::DeviceType::kDeviceCUDA) {
-        return add_kernel_cu;
-    } else {
+    }else {
         LOG(FATAL) << "Unknown device type for get a add kernel.";
         return nullptr;
     }
@@ -43,11 +46,10 @@ MatmulKernel get_matmul_kernel(base::DeviceType device_type) {
 }
 
 MatmulKernelQuant get_matmul_kernel_quant8(base::DeviceType device_type) {
-    if (device_type == base::DeviceType::kDeviceCPU) {
-        LOG(FATAL) << "No impl for CPU";
+    if (device_type == base::DeviceType::kDeviceCUDA) {
         return nullptr;
     } else {
-        LOG(FATAL) << "Unknown device type for get a matmul kernel.";
+        LOG(FATAL) << "Unknown device type for get an matmul kernel.";
         return nullptr;
     }
 }
@@ -100,8 +102,6 @@ SwigluKernel get_swiglu_kernel(base::DeviceType device_type) {
 RMSNormKernel get_rmsnorm_kernel(base::DeviceType device_type) {
     if (device_type == base::DeviceType::kDeviceCPU) {
         return rmsnorm_kernel_cpu;
-    } else if (device_type == base::DeviceType::kDeviceCUDA) {
-        return rmsnorm_kernel_cu;
     } else {
         LOG(FATAL) << "Unknown device type for get a rmsnorm kernel.";
         return nullptr;
@@ -109,8 +109,8 @@ RMSNormKernel get_rmsnorm_kernel(base::DeviceType device_type) {
 }
 
 RMSNormKernelDim get_rmsnorm_dim_kernel(base::DeviceType device_type) {
-    if (device_type == base::DeviceType::kDeviceCPU) {
-        LOG(FATAL) << "No impl for CPU";
+    if (device_type == base::DeviceType::kDeviceCUDA) {
+        return nullptr;
     } else {
         LOG(FATAL) << "Unknown device type for get a rmsnorm dim kernel.";
         return nullptr;

@@ -1,5 +1,5 @@
 #include "matmul_kernel.h"
-#include <armadillo>
+#include "../kernels_interface.h"
 #include "nanoinfer/base/base.h"
 
 namespace kernel {
