@@ -91,14 +91,13 @@ find_package(Armadillo REQUIRED)
 find_package(OpenMP REQUIRED)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     # -march=native 会自动开启 AVX512
-    # -ffast-math 允许编译器对浮点运算做更激进的优化
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native -O3 -fopenmp -ffast-math")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native -O3 -fopenmp")
 endif()
 
 aux_source_directory(src/tensor/ DIR_TENSOR)
 aux_source_directory(src/base/ DIR_BASE)
 aux_source_directory(src/op/ DIR_OP)
-#aux_source_directory(src/model/ DIR_MODEL)
+aux_source_directory(src/model/ DIR_MODEL)
 aux_source_directory(src/op/kernels/cpu DIR_KERNEL_CPU)
 aux_source_directory(src/op/kernels/cuda DIR_KERNEL_CUDA)
 aux_source_directory(src/op/kernels/ DIR_KERNEL)
