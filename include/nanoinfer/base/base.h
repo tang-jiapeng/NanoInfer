@@ -13,37 +13,6 @@
         (void)(expr); \
     } while (0)
 
-namespace model {
-
-/**
- * @brief 模型推理过程中的缓冲区类型枚举
- *
- * 定义了 LLM 推理过程中各个阶段产生的中间数据或特定的 Buffer 用途
- * 主要用于显存管理和算子间的数据传递
- */
-enum class ModelBufferType {
-    kInputTokens = 0,        ///< 输入 Token ID 序列
-    kInputEmbeddings = 1,    ///< Token 对应的 Embedding 向量
-    kOutputRMSNorm = 2,      ///< RMSNorm 层的输出
-    kKeyCache = 3,           ///< KV Cache 中的 Key 缓存
-    kValueCache = 4,         ///< KV Cache 中的 Value 缓存
-    kQuery = 5,              ///< Attention 中的 Query 向量
-    kInputPos = 6,           ///< 输入 Token 的位置索引 (RoPE 使用)
-    kScoreStorage = 7,       ///< Attention Score 存储
-    kOutputMHA = 8,          ///< Multi-Head Attention 的输出结果
-    kAttnOutput = 9,         ///< Attention 层的最终输出
-    kW1Output = 10,          ///< FFN 层 W1 (Gate) 的输出
-    kW2Output = 11,          ///< FFN 层 W2 (Down) 的输出
-    kW3Output = 12,          ///< FFN 层 W3 (Up) 的输出
-    kFFNRMSNorm = 13,        ///< FFN 之前的 RMSNorm 输出
-    kForwardOutput = 15,     ///< 模型最终的前向传播输出 (GPU)
-    kForwardOutputCPU = 16,  ///< 模型最终输出的 CPU 副本
-
-    kSinCache = 17,  ///< RoPE 预计算的 Sin 表
-    kCosCache = 18,  ///< RoPE 预计算的 Cos 表
-};
-}  // namespace model
-
 namespace base {
 
 /**
