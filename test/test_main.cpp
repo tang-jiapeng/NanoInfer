@@ -7,6 +7,10 @@ int main(int argc, char* argv[]) {
     FLAGS_log_dir = "./log/";
     FLAGS_alsologtostderr = true;
 
+    testing::GTEST_FLAG(filter) = "KVCacheManagerTest.*";
+
+    FLAGS_v = 2;
+
     LOG(INFO) << "Start Test...\n";
     return RUN_ALL_TESTS();
 }
