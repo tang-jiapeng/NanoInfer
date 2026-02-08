@@ -31,7 +31,7 @@ if (QWEN3_SUPPORT)
 endif()
 # ---- Add dependencies via CPM ----
 # see https://github.com/TheLartians/CPM.cmake for more info
-option(USE_CPM "Use CPM for dependency management" OFF)
+option(USE_CPM "Use CPM for dependency management" ON)
 
 if(USE_CPM)
     # Use CPM to manage dependencies
@@ -102,10 +102,11 @@ aux_source_directory(src/op/kernels/cpu DIR_KERNEL_CPU)
 aux_source_directory(src/op/kernels/cuda DIR_KERNEL_CUDA)
 aux_source_directory(src/op/kernels/ DIR_KERNEL)
 aux_source_directory(src/sampler DIR_SAMPLE)
+aux_source_directory(src/engine DIR_ENGINE)
 
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/lib)
 
-add_library(llama SHARED ${DIR_TENSOR} ${DIR_BASE} ${DIR_OP} ${DIR_KERNEL} ${DIR_MODEL} ${DIR_KERNEL_CPU} ${DIR_KERNEL_CUDA} ${DIR_KERNEL} ${DIR_SAMPLE})
+add_library(llama SHARED ${DIR_TENSOR} ${DIR_BASE} ${DIR_OP} ${DIR_KERNEL} ${DIR_MODEL} ${DIR_KERNEL_CPU} ${DIR_KERNEL_CUDA} ${DIR_KERNEL} ${DIR_SAMPLE} ${DIR_ENGINE})
 target_link_libraries(llama sentencepiece glog::glog gtest gtest_main pthread cudart armadillo OpenMP::OpenMP_CXX)
 target_link_directories(llama PUBLIC ${CMAKE_CUDA_COMPILER_LIBRARY_ROOT}/lib64)
 
