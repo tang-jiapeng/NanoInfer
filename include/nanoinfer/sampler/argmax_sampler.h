@@ -37,6 +37,20 @@ class ArgmaxSampler : public Sampler {
      * @return size_t 最大 Logit 对应的索引
      */
     size_t sample(const float* logits, size_t size, void* stream) override;
+
+    /**
+     * @brief [New] 批处理采样 (Engine 核心调用)
+     *
+     * @param logits 输入张量。
+     * - Shape: [batch_size, vocab_size]
+     * - Data: float32
+     * @param output_ids 输出张量。
+     * - Shape: [batch_size]
+     * - Data: int32_t (存储 Token ID)
+     * - Device: 必须与 device_type_ 一致
+     */
+    void sample_batched(const tensor::Tensor& logits, tensor::Tensor& output_ids,
+                        void* stream = nullptr) override;
 };
 }  // namespace sampler
 

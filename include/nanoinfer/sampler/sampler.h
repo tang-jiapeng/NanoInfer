@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include "nanoinfer/base/base.h"
+#include "nanoinfer/tensor/tensor.h"
 
 namespace sampler {
 
@@ -33,6 +34,25 @@ class Sampler {
      * @return size_t 被选中的 Token Index
      */
     virtual size_t sample(const float* logits, size_t size, void* stream = nullptr) = 0;
+
+    /**
+     * @brief [New/Batch] 执行批处理采样
+     * * 适用于: Continuous Batching Engine。
+     * 一次性对 Batch 中所有需要的 Logits 进行采样，结果写入输出 Tensor (通常在 GPU 上)。
+     * * @param logits      输入 Logits 张量
+     * Shape: [batch_size, vocab_size] (Engine 需提前提取好每个 Request 的最后一个 token
+     * 的 logits) 或者 [total_tokens, vocab_size] (需配合 index 索引，这里建议 Engine
+     * 整理好传进来)
+     * @param output_ids  输出 Token IDs 张量
+     * Shape: [batch_size]
+     * Device: 与 device_type_ 一致 (通常为 CUDA)
+     * @param stream      CUDA 流
+     */
+    virtual void sample_batched(const tensor::Tensor& logits, tensor::Tensor& output_ids,
+                                void* stream = nullptr) {
+        // 默认实现：如果子类没实现高效 Batch 版本，fallback 到循环调用 sample
+        LOG(ERROR) << "sample_batched not implemented for this sampler";
+    }
 
    protected:
     base::DeviceType device_type_;

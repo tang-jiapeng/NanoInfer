@@ -12,11 +12,28 @@
 
 namespace model {
 
+struct ForwardBatch {
+    // 拼接后的 Token ID 列表 (Batch 中所有请求的当前步 Token)
+    std::vector<int32_t> token_ids;
+    std::vector<int32_t> positions;  ///< 拼接后的 Position ID 列表 (用于 RoPE)
+    std::vector<int32_t> seq_ids;    ///< 对应的 Sequence ID (用于调试或特定逻辑)
+
+    tensor::Tensor block_table;  ///< GPU Tensor: [batch_size, max_blocks_per_seq]
+
+    // 每个请求的上下文长度 (用于 Attention Mask/Scale)
+    std::vector<int32_t> context_lens;
+    int32_t max_context_len = 0;  ///< 当前 Batch 中最大的上下文长度 (用于 Kernel 配置)
+
+    int32_t batch_size = 0;  ///< 当前 Batch 的序列数量
+};
+
 /**
  * @brief 模型抽象基类
  *
  * 这是一个 Template Method 模式的基类，定义了 LLM 推理的标准流程：
  * Init -> Encode -> Embedding -> Forward (Layers) -> Sampler -> Decode
+ *
+ * 新增了支持 PagedAttention 的批处理接口
  */
 class Model {
    public:
@@ -42,8 +59,38 @@ class Model {
      */
     virtual base::Status init(base::DeviceType device_type) = 0;
 
+    // PagedAttention & Continuous Batching 接口
+
     /**
-     * @brief 执行单步预测 (对外接口)
+     * @brief 注入 KV Cache 物理张量
+     * * 在 Engine 初始化或分配 KV Cache 后调用。
+     * Model 应当保存这些 Tensor 的引用/指针，供 Attention 算子使用。
+     * Model 不负责管理这些 Tensor 的生命周期。
+     * * @param key_caches 每层的 Key Cache 物理张量 (Pool)
+     * @param value_caches 每层的 Value Cache 物理张量 (Pool)
+     */
+    virtual void set_kv_cache(const std::vector<tensor::Tensor>& key_caches,
+                              const std::vector<tensor::Tensor>& value_caches) {
+        (void)key_caches;
+        (void)value_caches;
+    }
+
+    /**
+     * @brief 执行批处理前向传播
+     * * 基于 BlockTable 进行非连续显存访问。
+     * * @param input 批处理输入包 (包含 tokens, positions, block_table 等)
+     * @param logits [输出] 预测的 Logits 张量 [total_tokens, vocab_size]
+     */
+    virtual base::Status forward_batched(const ForwardBatch& input, tensor::Tensor& logits) {
+        return base::error::FunctionNotImplement("forward_batched not implemented");
+    }
+
+    const TransformerConfig& config() const {
+        return *config_;
+    }
+
+    /**
+     * @brief 执行单步预测
      *
      * @param input 输入张量 (通常是 Token IDs)
      * @param pos_tensor 当前输入的位置索引 (用于 RoPE)
@@ -52,17 +99,16 @@ class Model {
      * - false: Decode 阶段 (生成阶段，一次计算一个 Token)
      * @param next [输出] 预测生成的下一个 Token ID
      */
-    virtual base::Status predict(const tensor::Tensor& input,
-                                 const tensor::Tensor& pos_tensor, bool is_prompt,
-                                 int& next) const = 0;
+    virtual base::Status predict(const tensor::Tensor& input, const tensor::Tensor& pos_tensor,
+                                 bool is_prompt, int& next) const = 0;
 
     /**
      * @brief 执行前向传播 (内部计算图)
      *
      * 依次调用各个 Layer 的 forward 函数，将数据从 Embedding 传导至 Output。
      */
-    virtual base::Status forward(const tensor::Tensor& input,
-                                 const tensor::Tensor& pos_tensor, int& next) const = 0;
+    virtual base::Status forward(const tensor::Tensor& input, const tensor::Tensor& pos_tensor,
+                                 int& next) const = 0;
 
     base::ModelType model_type() const;
 
@@ -114,8 +160,8 @@ class Model {
      * @param token_pos 当前 Token 的位置 (用于定位写入 offset)
      * @return pair<KeyTensor, ValueTensor>
      */
-    virtual std::pair<tensor::Tensor, tensor::Tensor> slice_kv_cache(
-        int32_t layer_idx, int32_t token_pos) const;
+    virtual std::pair<tensor::Tensor, tensor::Tensor> slice_kv_cache(int32_t layer_idx,
+                                                                     int32_t token_pos) const;
 
     /**
      * @brief 执行 Embedding 操作
@@ -139,8 +185,7 @@ class Model {
      *
      * @return base::Status 如果 Key 已存在，返回 KeyHasExits 错误。
      */
-    virtual base::Status insert_buffer(ModelBufferType buffer_idx,
-                                       const tensor::Tensor& tensor);
+    virtual base::Status insert_buffer(ModelBufferType buffer_idx, const tensor::Tensor& tensor);
 
     /**
      * @brief 读取模型权重文件
@@ -211,10 +256,9 @@ class Model {
     std::string token_path_;
     std::string model_path_;
     std::unique_ptr<op::EncodeLayerBase> encode_layer_;  ///< 分词器实例
-    std::map<ModelBufferType, tensor::Tensor>
-        buffers_;  ///< 缓冲区池 (KV Cache, 中间变量)
-    std::unique_ptr<sampler::Sampler> sampler_;     ///< 采样器实例
-    std::shared_ptr<RawModelData> raw_model_data_;  ///< 原始权重数据
+    std::map<ModelBufferType, tensor::Tensor> buffers_;  ///< 缓冲区池 (KV Cache, 中间变量)
+    std::unique_ptr<sampler::Sampler> sampler_;          ///< 采样器实例
+    std::shared_ptr<RawModelData> raw_model_data_;       ///< 原始权重数据
     base::DeviceType device_type_ = base::DeviceType::kDeviceUnknown;
     base::ModelType model_type_ = base::ModelType::kModelTypeUnknown;
     base::TokenizerType tokenizer_type_ = base::TokenizerType::kEncodeUnknown;

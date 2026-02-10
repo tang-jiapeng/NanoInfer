@@ -16,13 +16,17 @@ namespace model {
  * 实际使用前应确保这些参数已被正确填充。
  */
 struct ModelConfig {
-    int32_t dim = 0;  ///< 模型嵌入维度 (embedding dimension)，通常为 4096
+    int32_t dim = 0;          ///< 模型嵌入维度 (embedding dimension)，通常为 4096
     int32_t hidden_dim = 0;   ///< FFN (前馈网络) 隐层维度，通常为 dim * 8/3
     int32_t layer_num = 0;    ///< Transformer 层数 (编码器层数)，通常为 32-80
     int32_t head_num = 0;     ///< 多头注意力的头数 (num_heads)，通常为 32
     int32_t kv_head_num = 0;  ///< Key/Value 的头数 (用于 Group Query Attention)
     int32_t vocab_size = 0;   ///< 词汇表大小，通常为 32000+
-    int32_t seq_len = 0;  ///< 最大序列长度 (context length)，通常为 512-4096
+    int32_t seq_len = 0;      ///< 最大序列长度 (context length)，通常为 512-4096
+
+    // 特殊 Token ID
+    int32_t bos_token_id = -1;
+    int32_t eos_token_id = -1;
 };
 
 /**
@@ -39,8 +43,8 @@ struct ModelConfig {
  * - head_size_ = dim / head_num（单个注意力头的维度）
  */
 struct TransformerConfig {
-    int32_t kv_dim_ = 0;  ///< Key/Value 的总维度 = dim * kv_head_num / head_num
-    int32_t kv_mul_ = 0;  ///< 多头倍数因子 = head_num / kv_head_num (用于 GQA)
+    int32_t kv_dim_ = 0;     ///< Key/Value 的总维度 = dim * kv_head_num / head_num
+    int32_t kv_mul_ = 0;     ///< 多头倍数因子 = head_num / kv_head_num (用于 GQA)
     int32_t head_size_ = 0;  ///< 单个注意力头的维度 = dim / head_num，通常为 128
 
     int32_t vocab_size_ = 0;  ///< 词汇表大小
@@ -52,6 +56,10 @@ struct TransformerConfig {
     int32_t kv_head_num_ = 0;        ///< Key/Value 头数
     int32_t seq_len_ = 0;            ///< 最大序列长度
     bool is_shared_weight_ = false;  ///< 是否采用 Embedding 和 Output 层权重共享
+
+    // 特殊 Token ID
+    int32_t bos_token_id_ = -1;
+    int32_t eos_token_id_ = -1;
 };
 
 /**
