@@ -65,42 +65,28 @@ class LLamaModel : public Model {
     explicit LLamaModel(base::TokenizerType tokenizer_type, std::string token_path,
                         std::string model_path, bool is_quant_model);
 
+    ~LLamaModel() = default;
+
     /**
-     * @brief 初始化 Llama 模型
-     * 调用基类的 init 流程，并额外分配 CUDA Stream 资源。
+     * @brief 初始化：加载权重，构建计算图
      */
     base::Status init(base::DeviceType device_type) override;
 
     /**
-     * @brief 对外预测接口
-     *
-     * 1. 预处理：Embedding。
-     * 2. 执行 forward 计算图。
-     * 3. 后处理：采样得到 Next Token。
+     * @brief [Core] 批处理前向传播
+     * 负责调度每一层的计算：Norm -> QKV -> RoPE -> PagedAttn -> FFN -> ...
      */
-    base::Status predict(const tensor::Tensor& input, const tensor::Tensor& pos_tensor,
-                         bool is_prompt, int& next) const override;
+    base::Status forward_batched(const ForwardBatch& input, tensor::Tensor& logits) override;
 
     /**
-     * @brief 核心前向计算图
-     *
-     * 循环执行 transformer_layers_num 次 Block 计算。
+     * @brief 注入 KV Cache
+     * Model 类直接持有 KV Cache 的物理 Tensor，
+     * 在 forward_batched 循环中，将对应的 Cache 传递给 Attention 算子。
      */
-    base::Status forward(const tensor::Tensor& input, const tensor::Tensor& pos_tensor,
-                         int& next) const override;
-
-    /**
-     * @brief 执行 Embedding 查找
-     */
-    op::EmbeddingOutput embedding(const std::vector<int>& tokens) const override;
+    void set_kv_cache(const std::vector<tensor::Tensor>& key_caches,
+                      const std::vector<tensor::Tensor>& value_caches) override;
 
    private:
-    /**
-     * @brief 显存预分配
-     * 根据 max_seq_len 和 hidden_size 计算 KV Cache 和中间 Buffer 所需内存并分配。
-     */
-    void init_mem() override;
-
     /**
      * @brief 构建计算图中的所有层
      */
@@ -121,44 +107,16 @@ class LLamaModel : public Model {
      */
     void create_param_quant_layers() override;
 
-    /**
-     * @brief 执行 Multi-Head Attention 计算
-     * 包括：RoPE -> Update KV Cache -> Attention Score -> Context Output
-     */
-    void attention_mha(int32_t layer_idx, const tensor::Tensor& pos_tensor) const;
-
-    /**
-     * @brief 执行 Attention 之前的 RMSNorm
-     */
-    void attention_rms(int32_t layer_idx, const tensor::Tensor& input) const;
-
-    /**
-     * @brief 执行 Feed-Forward Network (FFN)
-     * 流程：RMSNorm (Post-Attn) -> (Gate * Up) -> SwiGLU -> Down -> Add Residual
-     */
-    void feed_forward(int32_t layer_idx, const tensor::Tensor& input) const;
-
-    /**
-     * @brief 执行 QKV 线性投影
-     * 输入 -> Wq/Wk/Wv -> Query/Key/Value Tensors
-     */
-    void attention_qkv(int32_t layer_idx, const tensor::Tensor& pos_tensor) const;
-
-    /**
-     * @brief 计算最终的分类 Logits
-     * 最后的 RMSNorm -> Linear (Vocab Projection)
-     */
-    void cls_logits(const tensor::Tensor& input) const;
-
-    /**
-     * @brief 后处理采样
-     * Logits -> Probabilities -> Next Token ID
-     */
-    int32_t post_processing(const tensor::Tensor& pos, bool is_prompt) const override;
+    base::Status embedding_batched(const std::vector<int32_t>& tokens, 
+                                   tensor::Tensor& embeddings);
 
    private:
     std::shared_ptr<kernel::CudaConfig> cuda_config_;  ///< CUDA 执行配置 (Stream)
     std::unique_ptr<LLamaLayers> llama_layers_;        ///< 所有算子的容器
+
+    // KV Cache 引用 (由 Engine 分配，Model 持有引用)
+    std::vector<tensor::Tensor> key_caches_;
+    std::vector<tensor::Tensor> value_caches_;
 };
 
 }  // namespace model

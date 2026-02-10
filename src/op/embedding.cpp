@@ -9,35 +9,29 @@ EmbeddingLayer::EmbeddingLayer(base::DeviceType device_type, int32_t dim, int32_
       vocab_size_(vocab_size),
       LayerParam(device_type, LayerType::kLayerEmbedding, false, "Embedding") {
     reset_weight_size(1);
-    reset_input_size(2);
+    reset_input_size(1);
     reset_output_size(1);
 }
 
 base::Status EmbeddingLayer::check() const {
     const auto& input_tensor = get_input(0);
-    const auto& token_size = get_input(1).size();
-    if (token_size > input_tensor.size()) {
-        return base::error::InvalidArgument(
-            "The number of input tensor is greater than seq len.");
+    int32_t token_num = static_cast<int32_t>(input_tensor.size());
+
+    // 检查 Input (token_ids)
+    if (input_tensor.is_empty()) {
+        return base::error::InvalidArgument("The input tensor is empty.");
     }
 
+    // 检查 Weight [vocab_size, dim]
     base::Status status =
-        check_tensor_with_dim(input_tensor, base::DeviceType::kDeviceCPU,
-                              base::DataType::kDataTypeInt32, token_size);
-    if (!status) {
-        LOG(ERROR) << "The input tensor error in the embedding layer.";
-        return status;
-    }
-
-    status =
         check_tensor_with_dim(get_weight(0), device_type_, data_type_, vocab_size_, dim_);
     if (!status) {
         LOG(ERROR) << "The weight tensor error in the embedding layer.";
         return status;
     }
 
-    status =
-        check_tensor_with_dim(get_output(0), device_type_, data_type_, token_size, dim_);
+    // 检查 Output [token_num, dim]
+    status = check_tensor_with_dim(get_output(0), device_type_, data_type_, token_num, dim_);
     if (!status) {
         LOG(ERROR) << "The output tensor error in the embedding layer.";
         return status;
@@ -54,8 +48,8 @@ base::Status EmbeddingLayer::forward() {
         CHECK(cuda_config_ != nullptr);
     }
     kernel::get_embedding_kernel(device_type_)(get_input(0), get_weight(0), get_output(0),
-                                         vocab_size_,
-                                         cuda_config_ ? cuda_config_->stream : nullptr);
+                                               vocab_size_,
+                                               cuda_config_ ? cuda_config_->stream : nullptr);
     return base::StatusCode::kSuccess;
 }
 }  // namespace op

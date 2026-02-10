@@ -103,30 +103,22 @@ LLamaModel::LLamaModel(base::TokenizerType tokenizer_type, std::string token_pat
             std::move(model_path), is_quant_model) {
 }
 
-/**
- * @brief Llama 模型初始化流程
- * 1. 检查路径和设备兼容性。
- * 2. 初始化 CUDA 上下文 (如果需要)。
- * 3. 加载模型文件 (mmap)。
- * 4. 分配显存 (init_mem)。
- * 5. 预计算 RoPE 的 Sin/Cos 缓存表。
- * 6. 初始化采样器。
- */
 base::Status LLamaModel::init(base::DeviceType device_type) {
     if (token_path_.empty()) {
         return base::error::PathNotValid(token_path_);
     }
-    // CPU 暂不支持 Int8 量化推理
+
     if (device_type == base::DeviceType::kDeviceCPU && is_quant_model_) {
-        return base::error::InternalError(
-            "The cpu device do not support int8 quant model.");
+        return base::error::InternalError("Quantized model is not supported on CPU device.");
     }
 
     device_type_ = device_type;
-    // [CUDA Init]: 创建 Stream 句柄
+
+    // 初始化 CUDA 上下文
     if (device_type == base::DeviceType::kDeviceCUDA) {
         cudaSetDevice(0);
         cuda_config_ = std::make_shared<kernel::CudaConfig>();
+
         cudaStreamCreate(&cuda_config_->stream);
         cudaError_t err = cudaGetLastError();
         if (err != cudaSuccess) {
@@ -134,62 +126,159 @@ base::Status LLamaModel::init(base::DeviceType device_type) {
         }
     }
 
-    // [Model Loading]: 从文件映射权重并构建层
+    // 加载模型权重并构建层 (基类方法 -> 调用 create_layers)
     base::Status read_status = gen_model_from_file();
     if (!read_status) {
         return read_status;
     }
 
-    // [Memory Alloc]: 预分配 KV Cache 和中间 Buffer
-    init_mem();
-
-    // [Pre-calc RoPE]: 计算旋转位置编码的 Sin/Cos 表
-    if (device_type_ == base::DeviceType::kDeviceCPU) {
-        kernel::sin_cos_cache_calc_cpu(
-            config_->head_size_, config_->seq_len_,
-            get_buffer(ModelBufferType::kSinCache).ptr<float>(),
-            get_buffer(ModelBufferType::kCosCache).ptr<float>());
-    } else {
-        // CHECK_NE(cuda_config_, nullptr);
-        // kernel::sin_cos_cache_calc_cu(config_->head_size_, config_->seq_len_,
-        //                               get_buffer(ModelBufferType::kSinCache),
-        //                               get_buffer(ModelBufferType::kCosCache),
-        //                               cuda_config_->stream);
+    if (device_type == base::DeviceType::kDeviceCUDA) {
+        // 将所有层迁移到 CUDA
+        llama_layers_->to_cuda(cuda_config_);
     }
 
-    // [Sampler Init]: 默认使用 Argmax 采样
-    sampler_ = std::make_unique<sampler::ArgmaxSampler>(device_type_);
+    // 预计算 RoPE 表 (Sin/Cos Cache)
+    // 可以在这里计算，也可以在 RoPELayer 内部 Lazy Init
+    // 先占位
+
     return base::error::Success();
 }
 
-/**
- * @brief 模型前向传播主循环 (The Main Loop)
- *
- * 对应 Transformer 的 Decoder 架构：
- * Input -> [Block 0] -> [Block 1] ... -> [Block N] -> Output
- */
-base::Status LLamaModel::forward(const tensor::Tensor& input,
-                                 const tensor::Tensor& pos_tensor, int& next) const {
-    if (input.is_empty()) {
-        return base::error::InvalidArgument("The input tensor is empty.");
-    }
-    if (device_type_ == base::DeviceType::kDeviceCPU && is_quant_model_) {
-        return base::error::InternalError("Unsupported int8 quant in the cpu device");
+void LLamaModel::set_kv_cache(const std::vector<tensor::Tensor>& key_caches,
+                              const std::vector<tensor::Tensor>& value_caches) {
+    key_caches_ = key_caches;
+    value_caches_ = value_caches;
+
+    // 简单校验
+    CHECK_EQ(key_caches_.size(), config_->layer_num_);
+    CHECK_EQ(value_caches_.size(), config_->layer_num_);
+
+    LOG(INFO) << "LLamaModel: KV Cache set with " << key_caches_.size() << " layers.";
+}
+
+base::Status LLamaModel::forward_batched(const ForwardBatch& input, tensor::Tensor& logits) {
+    int32_t total_tokens = static_cast<int32_t>(input.token_ids.size());
+    int32_t batch_size = input.batch_size;
+    int32_t dim = config_->dim_;
+    int32_t hidden_dim = config_->hidden_dim_;
+    int32_t kv_dim = config_->kv_dim_;
+
+    // 获取分配器 (用于临时变量)
+    std::shared_ptr<base::DeviceAllocator> allocator;
+    if (device_type_ == base::DeviceType::kDeviceCUDA) {
+        allocator = base::CUDADeviceAllocatorFactory::get_instance();
+    } else {
+        allocator = base::CPUDeviceAllocatorFactory::get_instance();
     }
 
-    // 逐层执行 Transformer Block
-    for (int32_t layer_idx = 0; layer_idx < config_->layer_num_; ++layer_idx) {
-        // RMSNorm (Pre-Attention)
-        attention_rms(layer_idx, input);
-        // QKV Projection & RoPE
-        attention_qkv(layer_idx, pos_tensor);
-        // Multi-Head Attention (Self-Attention)
-        attention_mha(layer_idx, pos_tensor);
-        // Feed Forward Network (FFN) with Residual
-        feed_forward(layer_idx, input);
+    // Embedding: Tokens -> Hidden States
+    // hidden_states: [total_tokens, dim]
+    tensor::Tensor hidden_states(base::DataType::kDataTypeFp32, total_tokens, dim, true, allocator);
+    STATUS_CHECK(embedding_batched(input.token_ids, hidden_states));
+
+    // 准备 RoPE 需要的 Position Tensor
+    // RoPE Layer 需要一个 Tensor 输入，我们需要将 std::vector<int32_t> 拷贝进去
+    tensor::Tensor pos_tensor(base::DataType::kDataTypeInt32, total_tokens, true, allocator);
+
+    if (device_type_ == base::DeviceType::kDeviceCUDA) {
+        // 异步拷贝: Host -> Device
+        cudaMemcpyAsync(pos_tensor.ptr<void>(), input.positions.data(),
+                        total_tokens * sizeof(int32_t), cudaMemcpyHostToDevice,
+                        cuda_config_->stream);
+    } else {
+        // CPU 拷贝
+        std::memcpy(pos_tensor.ptr<void>(), input.positions.data(), total_tokens * sizeof(int32_t));
     }
-    // Final Classification (Norm -> Linear)
-    cls_logits(input);
+
+    // 分配层间临时 Tensor
+
+    // norm_out: 存储 RMSNorm 后的结果
+    tensor::Tensor norm_out(base::DataType::kDataTypeFp32, total_tokens, dim, true, allocator);
+
+    // Attention Outputs
+    tensor::Tensor q(base::DataType::kDataTypeFp32, total_tokens, dim, true, allocator);
+    tensor::Tensor k(base::DataType::kDataTypeFp32, total_tokens, kv_dim, true, allocator);
+    tensor::Tensor v(base::DataType::kDataTypeFp32, total_tokens, kv_dim, true, allocator);
+    tensor::Tensor attn_out(base::DataType::kDataTypeFp32, total_tokens, dim, true, allocator);
+
+    // FFN Outputs
+    tensor::Tensor w1_out(base::DataType::kDataTypeFp32, total_tokens, hidden_dim, true, allocator);
+    tensor::Tensor w3_out(base::DataType::kDataTypeFp32, total_tokens, hidden_dim, true, allocator);
+    tensor::Tensor ffn_out(base::DataType::kDataTypeFp32, total_tokens, dim, true, allocator);
+
+    // 逐层执行 Transformer Block
+    for (int32_t i = 0; i < config_->layer_num_; ++i) {
+        // Part A: Attention Block
+
+        // A1. Pre-Attention RMSNorm
+        // Input: hidden_states -> Output: norm_out
+        STATUS_CHECK(llama_layers_->rmsnorm_layers_[i]->forward(hidden_states, norm_out));
+
+        // A2. QKV Projection
+        STATUS_CHECK(llama_layers_->wq_layers_[i]->forward(norm_out, q));
+        STATUS_CHECK(llama_layers_->wk_layers_[i]->forward(norm_out, k));
+        STATUS_CHECK(llama_layers_->wv_layers_[i]->forward(norm_out, v));
+
+        // A3. RoPE (In-place on Q and K)
+        // TODO: RoPE Layer 需要支持 batch pos_tensor; layer 内部处理或不使用外部 cache
+        tensor::Tensor dummy_cache;
+        STATUS_CHECK(
+            llama_layers_->rope_layer_->forward(q, k, pos_tensor, dummy_cache, dummy_cache));
+
+        // A4. Paged Attention
+        // 输入: Q, K, V, BlockTable, KVCache[i]
+        // 输出: attn_out
+        // TODO : 占位，未实现算子
+
+        // A5. Residual Add (Attention)
+        // hidden_states = hidden_states + attn_out
+        STATUS_CHECK(llama_layers_->add_layer_->forward(hidden_states, attn_out, hidden_states));
+
+        // Part B: Feed-Forward Block (FFN)
+
+        // B1. Pre-FFN RMSNorm
+        // rmsnorm_layers_ 的布局是 [AttnNorm... , FFNNorm... , Final]
+        int32_t ffn_norm_idx = i + config_->layer_num_;
+        STATUS_CHECK(
+            llama_layers_->rmsnorm_layers_[ffn_norm_idx]->forward(hidden_states, norm_out));
+
+        // B2. Gate & Up Projection (W1, W3)
+        STATUS_CHECK(llama_layers_->w1_layers_[i]->forward(norm_out, w1_out));
+        STATUS_CHECK(llama_layers_->w3_layers_[i]->forward(norm_out, w3_out));
+
+        // B3. SwiGLU Activation
+        // w1 = Swish(w1) * w3 (In-place update w1_out)
+        STATUS_CHECK(llama_layers_->swiglu_layer_->forward(w1_out, w3_out, w1_out));
+
+        // B4. Down Projection (W2)
+        STATUS_CHECK(llama_layers_->w2_layers_[i]->forward(w1_out, ffn_out));
+
+        // B5. Residual Add (FFN)
+        // hidden_states = hidden_states + ffn_out
+        STATUS_CHECK(llama_layers_->add_layer_->forward(hidden_states, ffn_out, hidden_states));
+    }
+
+    // Final RMSNorm 位于列表最后
+    STATUS_CHECK(llama_layers_->rmsnorm_layers_.back()->forward(hidden_states, hidden_states));
+
+    // Cls / Linear Head
+    // hidden_states -> logits
+    STATUS_CHECK(llama_layers_->cls_layer_->forward(hidden_states, logits));
+
+    return base::error::Success();
+}
+
+base::Status LLamaModel::embedding_batched(const std::vector<int32_t>& tokens,
+                                           tensor::Tensor& embeddings) {
+    // 构建临时 Input Tensor
+    std::shared_ptr<base::DeviceAllocator> alloc_cpu =
+        base::CPUDeviceAllocatorFactory::get_instance();
+    tensor::Tensor input_tokens(base::DataType::kDataTypeInt32, tokens.size(), true, alloc_cpu);
+    std::memcpy(input_tokens.ptr<void>(), tokens.data(), tokens.size() * sizeof(int32_t));
+    if (device_type_ == base::DeviceType::kDeviceCUDA) {
+        input_tokens.to_cuda(cuda_config_->stream);
+    }
+    STATUS_CHECK(llama_layers_->embedding_layer_->forward(input_tokens, embeddings));
     return base::error::Success();
 }
 
@@ -205,8 +294,8 @@ void LLamaModel::create_nonparam_layers() {
 
     // MHA 层：处理 Attention 核心计算 (Softmax, Score)
     llama_layers_->mha_layer_ = std::make_shared<op::MultiHeadAttention>(
-        device_type_, 0, config_->kv_mul_, config_->kv_dim_, config_->seq_len_,
-        config_->head_num_, config_->head_size_);
+        device_type_, 0, config_->kv_mul_, config_->kv_dim_, config_->seq_len_, config_->head_num_,
+        config_->head_size_);
 
     // Add 层：处理残差连接
     llama_layers_->add_layer_ = std::make_shared<op::VecAddLayer>(device_type_);
@@ -233,16 +322,14 @@ void LLamaModel::create_param_quant_layers() {
     for (int32_t i = 0; i < config_->layer_num_; ++i) {
         auto wq = std::make_shared<op::MatmulLayer>(device_type_, dim, dim, true);
         wq->set_group_size(group_size_);
-        wq->set_weight(0, {dim, dim}, this->raw_model_data_->weight(pos),
-                       cpu_device_type);
+        wq->set_weight(0, {dim, dim}, this->raw_model_data_->weight(pos), cpu_device_type);
         llama_layers_->wq_layers_.push_back(wq);
         pos = pos + dim * dim + wq->get_scale_num() * sizeof(float);
     }
 
     // 加载所有层的 Key Weights (Wk)
     for (int32_t i = 0; i < config_->layer_num_; ++i) {
-        auto wk =
-            std::make_shared<op::MatmulLayer>(device_type_, config_->kv_dim_, dim, true);
+        auto wk = std::make_shared<op::MatmulLayer>(device_type_, config_->kv_dim_, dim, true);
         wk->set_group_size(group_size_);
         wk->set_weight(0, {config_->kv_dim_, dim}, this->raw_model_data_->weight(pos),
                        cpu_device_type);
@@ -252,8 +339,7 @@ void LLamaModel::create_param_quant_layers() {
 
     // 加载所有层的 Value Weights (Wv)
     for (int32_t i = 0; i < config_->layer_num_; ++i) {
-        auto wv =
-            std::make_shared<op::MatmulLayer>(device_type_, config_->kv_dim_, dim, true);
+        auto wv = std::make_shared<op::MatmulLayer>(device_type_, config_->kv_dim_, dim, true);
         wv->set_group_size(group_size_);
         wv->set_weight(0, {config_->kv_dim_, dim}, this->raw_model_data_->weight(pos),
                        cpu_device_type);
@@ -265,8 +351,7 @@ void LLamaModel::create_param_quant_layers() {
     for (int32_t i = 0; i < config_->layer_num_; ++i) {
         auto wo = std::make_shared<op::MatmulLayer>(device_type_, dim, dim, true);
         wo->set_group_size(group_size_);
-        wo->set_weight(0, {dim, dim}, this->raw_model_data_->weight(pos),
-                       cpu_device_type);
+        wo->set_weight(0, {dim, dim}, this->raw_model_data_->weight(pos), cpu_device_type);
         llama_layers_->wo_layers_.push_back(wo);
         pos = pos + dim * dim + wo->get_scale_num() * sizeof(float);
     }
@@ -276,8 +361,7 @@ void LLamaModel::create_param_quant_layers() {
     for (int32_t i = 0; i < config_->layer_num_; ++i) {
         auto w1 = std::make_shared<op::MatmulLayer>(device_type_, hidden_dim, dim, true);
         w1->set_group_size(group_size_);
-        w1->set_weight(0, {hidden_dim, dim}, this->raw_model_data_->weight(pos),
-                       cpu_device_type);
+        w1->set_weight(0, {hidden_dim, dim}, this->raw_model_data_->weight(pos), cpu_device_type);
         llama_layers_->w1_layers_.push_back(w1);
         pos = pos + dim * hidden_dim + w1->get_scale_num() * sizeof(float);
     }
@@ -286,8 +370,7 @@ void LLamaModel::create_param_quant_layers() {
     for (int32_t i = 0; i < config_->layer_num_; ++i) {
         auto w2 = std::make_shared<op::MatmulLayer>(device_type_, dim, hidden_dim, true);
         w2->set_group_size(group_size_);
-        w2->set_weight(0, {dim, hidden_dim}, this->raw_model_data_->weight(pos),
-                       cpu_device_type);
+        w2->set_weight(0, {dim, hidden_dim}, this->raw_model_data_->weight(pos), cpu_device_type);
         llama_layers_->w2_layers_.push_back(w2);
         pos = pos + dim * hidden_dim + w2->get_scale_num() * sizeof(float);
     }
@@ -296,8 +379,7 @@ void LLamaModel::create_param_quant_layers() {
     for (int32_t i = 0; i < config_->layer_num_; ++i) {
         auto w3 = std::make_shared<op::MatmulLayer>(device_type_, hidden_dim, dim, true);
         w3->set_group_size(group_size_);
-        w3->set_weight(0, {hidden_dim, dim}, this->raw_model_data_->weight(pos),
-                       cpu_device_type);
+        w3->set_weight(0, {hidden_dim, dim}, this->raw_model_data_->weight(pos), cpu_device_type);
         llama_layers_->w3_layers_.push_back(w3);
         pos = pos + dim * hidden_dim + w3->get_scale_num() * sizeof(float);
     }
@@ -309,14 +391,13 @@ void LLamaModel::create_param_quant_layers() {
     // 处理 Shared Weight (Embedding 与 Output 权重共享的情况)
     if (config_->is_shared_weight_) {
         // // 复用 Embedding 权重 (位于 offset 0)
-        cls_layer->set_weight(0, {config_->vocab_size_, dim},
-                              this->raw_model_data_->weight(pos), cpu_device_type);
+        cls_layer->set_weight(0, {config_->vocab_size_, dim}, this->raw_model_data_->weight(pos),
+                              cpu_device_type);
     } else {
         // no shared
-        cls_layer->set_weight(0, {config_->vocab_size_, dim},
-                              this->raw_model_data_->weight(pos), cpu_device_type);
-        pos =
-            pos + config_->vocab_size_ * dim + cls_layer->get_scale_num() * sizeof(float);
+        cls_layer->set_weight(0, {config_->vocab_size_, dim}, this->raw_model_data_->weight(pos),
+                              cpu_device_type);
+        pos = pos + config_->vocab_size_ * dim + cls_layer->get_scale_num() * sizeof(float);
     }
     llama_layers_->cls_layer_ = cls_layer;
 
@@ -355,9 +436,8 @@ void LLamaModel::create_param_layers() {
         device_type_, config_->dim_, config_->seq_len_, std::abs(config_->vocab_size_));
 
     const void* weight_embedding = raw_model_data_->weight(0);
-    llama_layers_->embedding_layer_->set_weight(
-        0, {std::abs(config_->vocab_size_), config_->dim_}, weight_embedding,
-        cpu_device_type);
+    llama_layers_->embedding_layer_->set_weight(0, {std::abs(config_->vocab_size_), config_->dim_},
+                                                weight_embedding, cpu_device_type);
 
     // 加载 Wq, Wk, Wv, Wo, W1, W2, W3... (按类型分组)
     int32_t dim = config_->dim_;
@@ -365,8 +445,7 @@ void LLamaModel::create_param_layers() {
     // create weight matrix for query
     for (int32_t i = 0; i < config_->layer_num_; ++i) {
         auto wq = std::make_shared<op::MatmulLayer>(device_type_, dim, dim);
-        wq->set_weight(0, {dim, dim}, this->raw_model_data_->weight(pos),
-                       cpu_device_type);
+        wq->set_weight(0, {dim, dim}, this->raw_model_data_->weight(pos), cpu_device_type);
         llama_layers_->wq_layers_.push_back(wq);
         pos += dim * dim;
     }
@@ -392,8 +471,7 @@ void LLamaModel::create_param_layers() {
     // create weight matrix for output
     for (int32_t i = 0; i < config_->layer_num_; ++i) {
         auto wo = std::make_shared<op::MatmulLayer>(device_type_, dim, dim);
-        wo->set_weight(0, {dim, dim}, this->raw_model_data_->weight(pos),
-                       cpu_device_type);
+        wo->set_weight(0, {dim, dim}, this->raw_model_data_->weight(pos), cpu_device_type);
         llama_layers_->wo_layers_.push_back(wo);
         pos += dim * dim;
     }
@@ -405,8 +483,7 @@ void LLamaModel::create_param_layers() {
     int32_t hidden_dim = config_->hidden_dim_;
     for (int32_t i = 0; i < config_->layer_num_; ++i) {
         auto w1 = std::make_shared<op::MatmulLayer>(device_type_, hidden_dim, dim);
-        w1->set_weight(0, {hidden_dim, dim}, this->raw_model_data_->weight(pos),
-                       cpu_device_type);
+        w1->set_weight(0, {hidden_dim, dim}, this->raw_model_data_->weight(pos), cpu_device_type);
         llama_layers_->w1_layers_.push_back(w1);
         pos += dim * hidden_dim;
     }
@@ -414,8 +491,7 @@ void LLamaModel::create_param_layers() {
     // w2 layers
     for (int32_t i = 0; i < config_->layer_num_; ++i) {
         auto w2 = std::make_shared<op::MatmulLayer>(device_type_, dim, hidden_dim);
-        w2->set_weight(0, {dim, hidden_dim}, this->raw_model_data_->weight(pos),
-                       cpu_device_type);
+        w2->set_weight(0, {dim, hidden_dim}, this->raw_model_data_->weight(pos), cpu_device_type);
         llama_layers_->w2_layers_.push_back(w2);
         pos += dim * hidden_dim;
     }
@@ -423,8 +499,7 @@ void LLamaModel::create_param_layers() {
     // w3 layers
     for (int32_t i = 0; i < config_->layer_num_; ++i) {
         auto w3 = std::make_shared<op::MatmulLayer>(device_type_, hidden_dim, dim);
-        w3->set_weight(0, {hidden_dim, dim}, this->raw_model_data_->weight(pos),
-                       cpu_device_type);
+        w3->set_weight(0, {hidden_dim, dim}, this->raw_model_data_->weight(pos), cpu_device_type);
         llama_layers_->w3_layers_.push_back(w3);
         pos += dim * hidden_dim;
     }
@@ -439,12 +514,10 @@ void LLamaModel::create_param_layers() {
     if (config_->is_shared_weight_) {
         // using token embedding weight
         llama_layers_->cls_layer_->set_weight(0, {config_->vocab_size_, dim},
-                                              this->raw_model_data_->weight(0),
-                                              cpu_device_type);
+                                              this->raw_model_data_->weight(0), cpu_device_type);
     } else {
         llama_layers_->cls_layer_->set_weight(0, {config_->vocab_size_, dim},
-                                              this->raw_model_data_->weight(pos),
-                                              cpu_device_type);
+                                              this->raw_model_data_->weight(pos), cpu_device_type);
     }
 
     // create rmsnorm layer
@@ -462,10 +535,10 @@ void LLamaModel::create_param_layers() {
 
     // skip attention.wq attention.wk attention.wv attention.wo
     rmsnorm_pos += config_->layer_num_ * config_->dim_ * config_->dim_;
-    rmsnorm_pos += config_->layer_num_ * config_->dim_ *
-                   (config_->kv_head_num_ * config_->head_size_);
-    rmsnorm_pos += config_->layer_num_ * config_->dim_ *
-                   (config_->kv_head_num_ * config_->head_size_);
+    rmsnorm_pos +=
+        config_->layer_num_ * config_->dim_ * (config_->kv_head_num_ * config_->head_size_);
+    rmsnorm_pos +=
+        config_->layer_num_ * config_->dim_ * (config_->kv_head_num_ * config_->head_size_);
     rmsnorm_pos += config_->layer_num_ * config_->dim_ * config_->dim_;
 
     for (int32_t i = 0; i < config_->layer_num_; ++i) {
@@ -487,106 +560,8 @@ void LLamaModel::create_param_layers() {
         std::make_shared<op::RmsNormLayer>(device_type_, config_->dim_);
 
     const void* weight_rmsnorm_final = raw_model_data_->weight(rmsnorm_pos);
-    rms_final_layer->set_weight(0, {config_->dim_}, weight_rmsnorm_final,
-                                cpu_device_type);
+    rms_final_layer->set_weight(0, {config_->dim_}, weight_rmsnorm_final, cpu_device_type);
     llama_layers_->rmsnorm_layers_.push_back(rms_final_layer);
-}
-
-/**
- * @brief 显存预分配与初始化
- * * 这是一个关键函数。为了避免推理过程中频繁申请显存导致碎片和性能下降，
- * 我们预先计算好推理过程中所需的所有 Buffer，并一次性注册到 Model 基类的 buffers_
- * 映射中。
- * * 分配策略：
- * 1. 静态 Buffer (KV Cache, Sin/Cos Table): 生命周期贯穿整个模型运行期。
- * 2. 临时 Buffer (Intermediate Outputs): 用于层间传递数据，可以复用。
- */
-void LLamaModel::init_mem() {
-    std::shared_ptr<base::DeviceAllocator> alloc;
-    if (device_type_ == base::DeviceType::kDeviceCPU) {
-        alloc = base::CPUDeviceAllocatorFactory::get_instance();
-    } else {
-        alloc = base::CUDADeviceAllocatorFactory::get_instance();
-    }
-
-    // 确保所有 Layer 已获取 CUDA Config
-    if (device_type_ == base::DeviceType::kDeviceCUDA) {
-        CHECK_NE(cuda_config_, nullptr);
-        llama_layers_->to_cuda(cuda_config_);
-    }
-
-    std::shared_ptr<base::DeviceAllocator> alloc_cpu =
-        base::CPUDeviceAllocatorFactory::get_instance();
-    std::shared_ptr<base::DeviceAllocator> alloc_cu =
-        base::CUDADeviceAllocatorFactory::get_instance();
-
-    // 输入输出 Buffer
-    tensor::Tensor input_tokens(base::DataType::kDataTypeInt32, 1, true, alloc_cpu);
-    tensor::Tensor input_embeddings(base::DataType::kDataTypeFp32, 1, config_->dim_, true,
-                                    alloc);
-
-    // RoPE 缓存表
-    tensor::Tensor sin_cache(base::DataType::kDataTypeFp32,
-                             config_->head_size_ * config_->seq_len_, true, alloc);
-    tensor::Tensor cos_cache(base::DataType::kDataTypeFp32,
-                             config_->head_size_ * config_->seq_len_, true, alloc);
-
-    CHECK(insert_buffer(ModelBufferType::kSinCache, sin_cache));
-    CHECK(insert_buffer(ModelBufferType::kCosCache, cos_cache));
-
-    CHECK(insert_buffer(ModelBufferType::kInputTokens, input_tokens));
-    CHECK(insert_buffer(ModelBufferType::kInputEmbeddings, input_embeddings));
-
-    // 通用中间层输出 Buffer (可复用)
-    // 用于存储 RMSNorm, MHA, FFN 等层的输出，通常 shape 为 [dim] 或 [hidden_dim]
-    tensor::Tensor rms_output(base::DataType::kDataTypeFp32, config_->dim_, true, alloc);
-    CHECK(insert_buffer(ModelBufferType::kOutputRMSNorm, rms_output));
-    CHECK(insert_buffer(ModelBufferType::kOutputMHA, rms_output));
-    CHECK(insert_buffer(ModelBufferType::kW2Output, rms_output));
-    CHECK(insert_buffer(ModelBufferType::kFFNRMSNorm, rms_output));
-
-    tensor::Tensor w1_output(base::DataType::kDataTypeFp32, config_->hidden_dim_, true,
-                             alloc);
-    tensor::Tensor w3_output(base::DataType::kDataTypeFp32, config_->hidden_dim_, true,
-                             alloc);
-
-    CHECK(insert_buffer(ModelBufferType::kW1Output, w1_output));
-    CHECK(insert_buffer(ModelBufferType::kW3Output, w3_output));
-
-    // KV Cache (占用显存最大)
-    // Shape: [LayerNum, SeqLen, KVDim]
-    tensor::Tensor key_cache(base::DataType::kDataTypeFp32, config_->layer_num_,
-                             config_->seq_len_, config_->kv_dim_, true, alloc);
-    tensor::Tensor value_cache(base::DataType::kDataTypeFp32, config_->layer_num_,
-                               config_->seq_len_, config_->kv_dim_, true, alloc);
-
-    CHECK(insert_buffer(ModelBufferType::kKeyCache, key_cache));
-    CHECK(insert_buffer(ModelBufferType::kValueCache, value_cache));
-
-    // Attention 中间变量
-    tensor::Tensor query(base::DataType::kDataTypeFp32, config_->dim_, true, alloc);
-    CHECK(insert_buffer(ModelBufferType::kQuery, query));
-
-    tensor::Tensor pos_tensor(base::DataType::kDataTypeInt32, 1, true, alloc_cpu);
-    CHECK(insert_buffer(ModelBufferType::kInputPos, pos_tensor));
-
-    // 用于存储 Attention Score (Softmax 前后)
-    tensor::Tensor attn(base::DataType::kDataTypeFp32, config_->head_num_,
-                        config_->seq_len_, true, alloc);
-    CHECK(insert_buffer(ModelBufferType::kScoreStorage, attn));
-    CHECK(insert_buffer(ModelBufferType::kAttnOutput, query));
-
-    // 最终输出 Logits
-    tensor::Tensor forward_output(base::DataType::kDataTypeFp32, config_->vocab_size_,
-                                  true, alloc);
-    // 如果是 CUDA 模式，还需要一个 CPU 端的 Buffer 用于接收 Logits 以进行采样
-    if (device_type_ == base::DeviceType::kDeviceCUDA) {
-        tensor::Tensor forward_output_cpu(base::DataType::kDataTypeFp32,
-                                          config_->vocab_size_, true, alloc_cpu);
-        CHECK(insert_buffer(ModelBufferType::kForwardOutputCPU, forward_output_cpu));
-    }
-
-    CHECK(insert_buffer(ModelBufferType::kForwardOutput, forward_output));
 }
 
 base::Status LLamaModel::create_layers() {
@@ -603,14 +578,12 @@ base::Status LLamaModel::create_layers() {
     create_nonparam_layers();
 
     if (!llama_layers_->embedding_layer_) {
-        return error::InternalError(
-            "Create the embedding layer for the llama model failed!");
+        return error::InternalError("Create the embedding layer for the llama model failed!");
     }
 
     // 校验 Norm 层数量 (2 * N + 1)
     if (llama_layers_->rmsnorm_layers_.size() != 2 * config_->layer_num_ + 1) {
-        return error::InternalError(
-            "Create the rmsnorm layers for the llama model failed!");
+        return error::InternalError("Create the rmsnorm layers for the llama model failed!");
     }
 
     if (llama_layers_->wq_layers_.size() != config_->layer_num_ ||
@@ -663,222 +636,9 @@ base::Status LLamaModel::create_layers() {
     }
 
     if (!llama_layers_->swiglu_layer_) {
-        return error::InternalError(
-            "Create the SwiGLU layer for the llama model failed!");
+        return error::InternalError("Create the SwiGLU layer for the llama model failed!");
     }
     return error::Success();
-}
-
-/**
- * @brief 执行 Embedding 查找
- * * 将离散的 Token IDs 转换为连续的 Vector，并处理 Buffer 的 Reshape 和赋值。
- */
-op::EmbeddingOutput LLamaModel::embedding(const std::vector<int>& tokens) const {
-    auto input_tokens = get_buffer(ModelBufferType::kInputTokens);
-    auto input_embeddings = get_buffer(ModelBufferType::kInputEmbeddings);
-
-    // 如果 Batch Size 变化，需要 Reshape (通常推理时 Batch=1)
-    if (input_tokens.size() != tokens.size()) {
-        input_tokens.reshape({static_cast<int32_t>(tokens.size())});
-        input_embeddings.reshape({static_cast<int32_t>(tokens.size()), config_->dim_});
-    }
-    // 填充 Token ID 数据
-    for (int32_t i = 0; i < tokens.size(); ++i) {
-        input_tokens.index<int32_t>(i) = tokens.at(i);
-    }
-
-    auto input_token_num = tensor::Tensor(base::DataType::kDataTypeInt32,
-                                          static_cast<int32_t>(tokens.size()));
-    LOG_IF(FATAL, !llama_layers_->embedding_layer_)
-        << "The embedding layer in the llama2 model is null pointer.";
-    STATUS_CHECK(llama_layers_->embedding_layer_->forward(input_tokens, input_token_num,
-                                                          input_embeddings));
-
-    op::EmbeddingOutput output(input_tokens, input_embeddings, input_token_num);
-    return output;
-}
-
-/**
- * @brief 执行 RMSNorm (Pre-Attention)
- * input -> RMSNorm -> kOutputRMSNorm
- */
-void LLamaModel::attention_rms(int32_t layer_idx, const tensor::Tensor& input) const {
-    CHECK(llama_layers_ != nullptr);
-    // attn rmsnorm
-    tensor::Tensor rmsnorm_output = get_buffer(ModelBufferType::kOutputRMSNorm);
-    std::shared_ptr<op::Layer> rmsnorm_layer =
-        llama_layers_->rmsnorm_layers_.at(layer_idx);
-    if (!rmsnorm_layer) {
-        LOG(FATAL) << "The attention rmsnorm layer is a null pointer in the llama2 model";
-    }
-    STATUS_CHECK(rmsnorm_layer->forward(input, rmsnorm_output));
-}
-
-/**
- * @brief 执行 QKV 投影和 RoPE
- * 1. 从 Cache 中获取当前层的 K, V 指针 (Zero-copy Slice)。
- * 2. 执行 Wq, Wk, Wv 投影。
- * 3. 执行 RoPE 旋转位置编码。
- */
-void LLamaModel::attention_qkv(int32_t layer_idx,
-                               const tensor::Tensor& pos_tensor) const {
-    CHECK(llama_layers_ != nullptr);
-    // kv cache
-    tensor::Tensor query = this->get_buffer(ModelBufferType::kQuery);
-    int32_t pos = pos_tensor.index<int32_t>(0);
-    // [Slice KV Cache]: 获取当前层、当前位置的 KV Cache 写入位置
-    const auto& [key, val] = slice_kv_cache(layer_idx, pos);
-    // query
-    const auto& query_layer = llama_layers_->wq_layers_.at(layer_idx);
-    CHECK_NE(query_layer, nullptr)
-        << "The query layer in the attention block is null pointer.";
-    // [Projection]: Input * W -> Q/K/V
-    auto rmsnorm_output = get_buffer(ModelBufferType::kOutputRMSNorm);
-    STATUS_CHECK(query_layer->forward(rmsnorm_output, query));
-
-    // key
-    const auto& key_layer = llama_layers_->wk_layers_.at(layer_idx);
-    CHECK_NE(key_layer, nullptr)
-        << "The key layer in the attention block is null pointer.";
-    STATUS_CHECK(key_layer->forward(rmsnorm_output, key));
-    // value
-    const auto& value_layer = llama_layers_->wv_layers_.at(layer_idx);
-    CHECK_NE(value_layer, nullptr)
-        << "The value layer in the attention block is null pointer.";
-    STATUS_CHECK(value_layer->forward(rmsnorm_output, val));
-
-    // [RoPE]: 对 Q 和 K 进行旋转
-    CHECK_NE(llama_layers_->rope_layer_, nullptr)
-        << "The RoPE layer in the attention block is null pointer.";
-    STATUS_CHECK(llama_layers_->rope_layer_->forward(
-        query, key, pos_tensor, get_buffer(ModelBufferType::kSinCache),
-        get_buffer(ModelBufferType::kCosCache), tensor::Tensor{}));
-}
-
-base::Status LLamaModel::predict(const tensor::Tensor& input,
-                                 const tensor::Tensor& pos_tensor, bool is_prompt,
-                                 int& next) const {
-    auto status = forward(input, pos_tensor, next);
-    if (!status) {
-        return status;
-    }
-    next = post_processing(pos_tensor, is_prompt);
-    return base::error::Success();
-}
-
-/**
- * @brief 执行 Multi-Head Attention
- * Q, K, V -> MHA Kernel -> Output
- */
-void LLamaModel::attention_mha(int32_t layer_idx,
-                               const tensor::Tensor& pos_tensor) const {
-    CHECK(llama_layers_ != nullptr);
-    // mha
-    tensor::Tensor key_cache = get_buffer(ModelBufferType::kKeyCache);
-    // VAL = [val1,val2,...val t]
-    // output @ VAL = 最终的结果
-    tensor::Tensor val_cache = get_buffer(ModelBufferType::kValueCache);
-
-    tensor::Tensor mha_output = get_buffer(ModelBufferType::kOutputMHA);
-    tensor::Tensor score_storage = get_buffer(ModelBufferType::kScoreStorage);
-    tensor::Tensor query = this->get_buffer(ModelBufferType::kQuery);
-
-    const auto& mha_layer = llama_layers_->mha_layer_;
-    CHECK_NE(mha_layer, nullptr) << "The multi head attention layer is null pointer.";
-    int pos = pos_tensor.index<int32_t>(0);
-    std::dynamic_pointer_cast<op::MultiHeadAttention>(mha_layer)->set_pos(pos);
-    std::dynamic_pointer_cast<op::MultiHeadAttention>(mha_layer)->set_layer_idx(
-        layer_idx);
-    STATUS_CHECK(
-        mha_layer->forward(query, score_storage, key_cache, val_cache, mha_output));
-
-    // wo @ attention output
-    tensor::Tensor attn_output = get_buffer(ModelBufferType::kAttnOutput);
-    const auto& wo_layer = llama_layers_->wo_layers_.at(layer_idx);
-    CHECK_NE(wo_layer, nullptr) << "The weight output layer is null pointer.";
-    STATUS_CHECK(wo_layer->forward(mha_output, attn_output));
-}
-
-/**
- * @brief 执行 FFN 模块
- * Residual + Norm -> Gate/Up -> SwiGLU -> Down -> Residual Add
- */
-void LLamaModel::feed_forward(int32_t layer_idx, const tensor::Tensor& input) const {
-    CHECK(llama_layers_ != nullptr);
-    // residual add
-    CHECK_NE(llama_layers_->add_layer_, nullptr)
-        << "The add layer in the feedforward block is null pointer";
-    STATUS_CHECK(llama_layers_->add_layer_->forward(
-        input, get_buffer(ModelBufferType::kAttnOutput), input));
-
-    // ffn rmsnorm
-    tensor::Tensor ffn_norm_output = get_buffer(ModelBufferType::kFFNRMSNorm);
-    const auto& ffn_rmsnorm =
-        llama_layers_->rmsnorm_layers_.at(layer_idx + config_->layer_num_);
-    CHECK_NE(ffn_rmsnorm, nullptr)
-        << "The final rmsnorm layer in the feedforward block is null pointer";
-    STATUS_CHECK(ffn_rmsnorm->forward(input, ffn_norm_output));
-
-    // w1
-    tensor::Tensor w1_output = get_buffer(ModelBufferType::kW1Output);
-    const auto& w1_layer = llama_layers_->w1_layers_.at(layer_idx);
-    CHECK_NE(w1_layer, nullptr)
-        << "The w1 layer in the feedforward block is null pointer";
-    STATUS_CHECK(w1_layer->forward(ffn_norm_output, w1_output));
-
-    // w3
-    tensor::Tensor w3_ouput = get_buffer(ModelBufferType::kW3Output);
-    const auto& w3_layer = llama_layers_->w3_layers_.at(layer_idx);
-    CHECK_NE(w3_layer, nullptr)
-        << "The w3 layer in the feedforward block is null pointer";
-    STATUS_CHECK(w3_layer->forward(ffn_norm_output, w3_ouput));
-
-    // SwiGLU
-    CHECK_NE(llama_layers_->swiglu_layer_, nullptr)
-        << "The swiglu layer in the feedforward block is null pointer";
-    STATUS_CHECK(llama_layers_->swiglu_layer_->forward(w1_output, w3_ouput, w1_output));
-
-    // w2
-    tensor::Tensor w2_output = get_buffer(ModelBufferType::kW2Output);
-    const auto& w2_layer = llama_layers_->w2_layers_.at(layer_idx);
-    CHECK_NE(w2_layer, nullptr)
-        << "The w2 layer in the feedforward block is null pointer";
-    STATUS_CHECK(w2_layer->forward(w1_output, w2_output));
-
-    // residual add
-    CHECK_NE(llama_layers_->add_layer_, nullptr)
-        << "The add layer in the feedforward block is null pointer";
-    STATUS_CHECK(llama_layers_->add_layer_->forward(input, w2_output, input));
-}
-
-/**
- * @brief 计算最终分类 Logits
- * Norm -> Linear
- */
-void LLamaModel::cls_logits(const tensor::Tensor& input) const {
-    CHECK(llama_layers_ != nullptr);
-    const auto& norm = llama_layers_->rmsnorm_layers_.at(2 * config_->layer_num_);
-    CHECK_NE(norm, nullptr);
-    STATUS_CHECK(norm->forward(input, input));
-
-    tensor::Tensor forward_output = get_buffer(ModelBufferType::kForwardOutput);
-    CHECK_NE(llama_layers_->cls_layer_, nullptr);
-    STATUS_CHECK(llama_layers_->cls_layer_->forward(input, forward_output));
-}
-
-int32_t LLamaModel::post_processing(const tensor::Tensor& pos, bool is_prompt) const {
-    tensor::Tensor forward_output = get_buffer(ModelBufferType::kForwardOutput);
-    const float* forward_logits = forward_output.ptr<float>();
-
-    int32_t next = 0;
-    if (is_prompt) {
-        next = -1;
-    } else {
-        next = static_cast<int32_t>(
-            sampler_->sample(forward_logits, forward_output.size(),
-                             cuda_config_ ? cuda_config_->stream : nullptr));
-    }
-    return next;
 }
 
 }  // namespace model

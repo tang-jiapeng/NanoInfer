@@ -113,12 +113,6 @@ class Model {
      */
     virtual std::vector<int32_t> encode(const std::string& sentence) const;
 
-    /**
-     * @brief 执行 Embedding 操作
-     * 具体的 Embedding Layer 由子类实例化
-     */
-    virtual op::EmbeddingOutput embedding(const std::vector<int>& tokens) const = 0;
-
    protected:
     /**
      * @brief 读取模型权重文件

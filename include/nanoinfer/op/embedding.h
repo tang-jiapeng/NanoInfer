@@ -6,23 +6,6 @@
 
 namespace op {
 
-/**
- * @brief Embedding 输出结果容器
- *
- * 用于封装 Embedding 层的相关数据，方便调试或作为中间结果传递。
- */
-struct EmbeddingOutput {
-    tensor::Tensor input_tokens;      ///< 输入的 Token ID 张量
-    tensor::Tensor input_embeddings;  ///< 输出的 Embedding 向量张量
-    tensor::Tensor input_token_num;   ///< 输入 Token 的总数量
-
-    explicit EmbeddingOutput(tensor::Tensor input_tokens, tensor::Tensor input_embeddings,
-                             tensor::Tensor input_token_num)
-        : input_tokens(std::move(input_tokens)),
-          input_embeddings(std::move(input_embeddings)),
-          input_token_num(std::move(input_token_num)) {
-    }
-};
 
 /**
  * @brief 词嵌入层 (Embedding Layer)
