@@ -30,10 +30,12 @@ struct ForwardBatch {
 /**
  * @brief 模型抽象基类
  *
- * 这是一个 Template Method 模式的基类，定义了 LLM 推理的标准流程：
- * Init -> Encode -> Embedding -> Forward (Layers) -> Sampler -> Decode
- *
- * 新增了支持 PagedAttention 的批处理接口
+ * 专注于支持 Continuous Batching 和 PagedAttention 的推理流程
+ * 职责：
+ * 1. 模型文件加载与解析
+ * 2. Tokenizer 管理
+ * 3. 权重加载与算子构建
+ * 4. 提供批处理前向传播接口
  */
 class Model {
    public:
@@ -51,11 +53,9 @@ class Model {
 
     /**
      * @brief 模型初始化 (核心流程)
-     *
-     * 1. 读取权重文件 (read_model_file)。
-     * 2. 创建各层对象 (create_layers)。
-     * 3. 规划并分配内存池 (init_mem)。
-     * 4. 资源迁移到指定设备 (to_cuda)。
+     * 1. 读取权重文件
+     * 2. 创建各层对象
+     * 3. 资源迁移
      */
     virtual base::Status init(base::DeviceType device_type) = 0;
 
@@ -89,46 +89,9 @@ class Model {
         return *config_;
     }
 
-    /**
-     * @brief 执行单步预测
-     *
-     * @param input 输入张量 (通常是 Token IDs)
-     * @param pos_tensor 当前输入的位置索引 (用于 RoPE)
-     * @param is_prompt 标记当前阶段:
-     * - true: Prefill 阶段 (处理 Prompt，一次性计算多个 Token)
-     * - false: Decode 阶段 (生成阶段，一次计算一个 Token)
-     * @param next [输出] 预测生成的下一个 Token ID
-     */
-    virtual base::Status predict(const tensor::Tensor& input, const tensor::Tensor& pos_tensor,
-                                 bool is_prompt, int& next) const = 0;
-
-    /**
-     * @brief 执行前向传播 (内部计算图)
-     *
-     * 依次调用各个 Layer 的 forward 函数，将数据从 Embedding 传导至 Output。
-     */
-    virtual base::Status forward(const tensor::Tensor& input, const tensor::Tensor& pos_tensor,
-                                 int& next) const = 0;
-
     base::ModelType model_type() const;
-
     const std::string& token_path() const;
-
     const std::string& model_path() const;
-
-    /**
-     * @brief 获取指定类型的缓冲区 (可变)
-     *
-     * 用于获取 KV Cache、中间激活值 (Score Storage) 等共享缓冲区。
-     * @param buffer_idx 缓冲区枚举 ID
-     * @return tensor::Tensor& 引用
-     */
-    virtual tensor::Tensor& get_buffer(ModelBufferType buffer_idx);
-
-    /**
-     * @brief 获取指定类型的缓冲区 (只读)
-     */
-    virtual const tensor::Tensor& get_buffer(ModelBufferType buffer_idx) const;
 
     /**
      * @brief 判断 Token 是否为结束符 (EOS)
@@ -151,42 +114,12 @@ class Model {
     virtual std::vector<int32_t> encode(const std::string& sentence) const;
 
     /**
-     * @brief 获取指定层的 KV Cache 切片
-     *
-     * 根据 layer_idx 和 token_pos 计算偏移量，返回指向全局 KV Cache 中对应位置的 Tensor。
-     * (Zero-Copy 视图)
-     *
-     * @param layer_idx 层号
-     * @param token_pos 当前 Token 的位置 (用于定位写入 offset)
-     * @return pair<KeyTensor, ValueTensor>
-     */
-    virtual std::pair<tensor::Tensor, tensor::Tensor> slice_kv_cache(int32_t layer_idx,
-                                                                     int32_t token_pos) const;
-
-    /**
      * @brief 执行 Embedding 操作
-     * 具体的 Embedding Layer 由子类实例化。
+     * 具体的 Embedding Layer 由子类实例化
      */
     virtual op::EmbeddingOutput embedding(const std::vector<int>& tokens) const = 0;
 
-    /**
-     * @brief 填充首层输入
-     *
-     * 将 Embedding 的结果与位置信息结合，构建传入 Transformer Block 的输入 Tensor。
-     * @note 实现上通常是零拷贝引用 (Zero-Copy View) Embedding 的输出内存。
-     */
-    virtual tensor::Tensor fill_input(const tensor::Tensor& pos_tensor,
-                                      const op::EmbeddingOutput& embedding_output,
-                                      bool is_prompt) const;
-
    protected:
-    /**
-     * @brief 注册一个新的缓冲区
-     *
-     * @return base::Status 如果 Key 已存在，返回 KeyHasExits 错误。
-     */
-    virtual base::Status insert_buffer(ModelBufferType buffer_idx, const tensor::Tensor& tensor);
-
     /**
      * @brief 读取模型权重文件
      *
@@ -213,20 +146,7 @@ class Model {
      */
     virtual base::Status generate_model_infos(const ModelConfig& config) const;
 
-    /**
-     * @brief 后处理 (Sampling)
-     *
-     * 将模型最终输出的 Logits 进行采样 (Argmax/Top-P)，得到 Next Token ID。
-     */
-    virtual int32_t post_processing(const tensor::Tensor& pos, bool is_prompt) const = 0;
-
    private:
-    /**
-     * @brief 初始化内存池
-     * 计算所有 Layer 所需的最大显存，并进行预分配。
-     */
-    virtual void init_mem() = 0;
-
     /**
      * @brief 创建所有层
      * 实例化 Attention, FeedForward, RMSNorm 等算子
@@ -256,8 +176,6 @@ class Model {
     std::string token_path_;
     std::string model_path_;
     std::unique_ptr<op::EncodeLayerBase> encode_layer_;  ///< 分词器实例
-    std::map<ModelBufferType, tensor::Tensor> buffers_;  ///< 缓冲区池 (KV Cache, 中间变量)
-    std::unique_ptr<sampler::Sampler> sampler_;          ///< 采样器实例
     std::shared_ptr<RawModelData> raw_model_data_;       ///< 原始权重数据
     base::DeviceType device_type_ = base::DeviceType::kDeviceUnknown;
     base::ModelType model_type_ = base::ModelType::kModelTypeUnknown;

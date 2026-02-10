@@ -47,4 +47,14 @@ int32_t SpeEncodeLayer::vocab_size() const {
     return spe->GetPieceSize();
 }
 
+int32_t SpeEncodeLayer::bos_id() const {
+    CHECK(spe != nullptr);
+    return spe->bos_id();
+}
+
+int32_t SpeEncodeLayer::eos_id() const {
+    CHECK(spe != nullptr);
+    return spe->eos_id();
+}
+
 }  // namespace op

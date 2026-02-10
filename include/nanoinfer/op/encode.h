@@ -64,6 +64,9 @@ class EncodeLayerBase : public Layer {
      */
     virtual int32_t vocab_size() const = 0;
 
+    virtual int32_t bos_id() const = 0;
+    virtual int32_t eos_id() const = 0;
+
    protected:
     bool has_bos_ = true;           ///< 是否添加 BOS
     bool has_eos_ = false;          ///< 是否添加 EOS
@@ -110,9 +113,11 @@ class SpeEncodeLayer : public EncodeLayerBase {
      */
     int32_t vocab_size() const override;
 
+    int32_t bos_id() const override;
+    int32_t eos_id() const override;
+
    private:
-    std::unique_ptr<sentencepiece::SentencePieceProcessor>
-        spe;  ///< SentencePiece 处理器实例
+    std::unique_ptr<sentencepiece::SentencePieceProcessor> spe;  ///< SentencePiece 处理器实例
 };
 
 }  // namespace op
