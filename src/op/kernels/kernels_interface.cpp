@@ -9,7 +9,7 @@
 #include "cpu/scale_sum_kernel.h"
 #include "cpu/softmax_kernel.h"
 #include "cpu/swiglu_kernel.h"
-// #include "cuda/add_kernel.cuh"
+#include "cuda/add_kernel.cuh"
 // #include "cuda/emb_kernel.cuh"
 // #include "cuda/matmul_kernel.cuh"
 // #include "cuda/mha_kernel.cuh"
@@ -21,7 +21,9 @@ namespace kernel {
 AddKernel get_add_kernel(base::DeviceType device_type) {
     if (device_type == base::DeviceType::kDeviceCPU) {
         return add_kernel_cpu;
-    }else {
+    } else if (device_type == base::DeviceType::kDeviceCUDA) {
+        return add_kernel_cu;
+    } else {
         LOG(FATAL) << "Unknown device type for get a add kernel.";
         return nullptr;
     }
@@ -104,15 +106,6 @@ RMSNormKernel get_rmsnorm_kernel(base::DeviceType device_type) {
         return rmsnorm_kernel_cpu;
     } else {
         LOG(FATAL) << "Unknown device type for get a rmsnorm kernel.";
-        return nullptr;
-    }
-}
-
-RMSNormKernelDim get_rmsnorm_dim_kernel(base::DeviceType device_type) {
-    if (device_type == base::DeviceType::kDeviceCUDA) {
-        return nullptr;
-    } else {
-        LOG(FATAL) << "Unknown device type for get a rmsnorm dim kernel.";
         return nullptr;
     }
 }

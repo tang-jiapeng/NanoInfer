@@ -3,7 +3,7 @@
 namespace kernel {
 
 void embedding_kernel_cpu(const tensor::Tensor& input, const tensor::Tensor& weight,
-                    const tensor::Tensor& output, int32_t vocab_size, void* stream) {
+                          const tensor::Tensor& output, int32_t vocab_size, void* stream) {
     CHECK(!input.is_empty());
     CHECK(!weight.is_empty());
     const int32_t input_num = static_cast<int32_t>(input.size());
@@ -14,8 +14,8 @@ void embedding_kernel_cpu(const tensor::Tensor& input, const tensor::Tensor& wei
     const auto allocator = base::CPUDeviceAllocatorFactory::get_instance();
     for (int32_t i = 0; i < input_num; ++i) {
         int32_t token = *input.ptr<int32_t>(i);
-        if (token > vocab_size) {
-            LOG(FATAL) << "Token index is greater than vocab size.";
+        if (token >= vocab_size || token < 0) {
+            LOG(FATAL) << "Token index is out of bounds.";
         } else {
             float* dest_ptr = const_cast<float*>(output.ptr<float>(i * weight_dim));
             float* src_ptr = const_cast<float*>(weight.ptr<float>(token * weight_dim));
@@ -23,8 +23,7 @@ void embedding_kernel_cpu(const tensor::Tensor& input, const tensor::Tensor& wei
                 allocator->memcpy(src_ptr, dest_ptr, weight_dim * sizeof(float),
                                   base::MemcpyKind::kMemcpyCPU2CPU);
             } else {
-                LOG(FATAL)
-                    << "Unknown device type of weight tensor in the embedding layer.";
+                LOG(FATAL) << "Unknown device type of weight tensor in the embedding layer.";
             }
         }
     }

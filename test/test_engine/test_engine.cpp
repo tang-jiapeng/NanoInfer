@@ -37,8 +37,6 @@ class MockModel : public model::Model {
     }
     void create_param_quant_layers() override {
     }
-    void init_mem() override {
-    }
 
     std::vector<int32_t> encode(const std::string& sentence) const override {
         return {10, 11, 12};
@@ -46,27 +44,6 @@ class MockModel : public model::Model {
 
     std::string decode(std::vector<int32_t> token_idxs) const override {
         return "mock_output";
-    }
-
-    // Unused legacy methods
-    base::Status predict(const tensor::Tensor& input, const tensor::Tensor& pos, bool is_prompt,
-                         int& next) const override {
-        return base::error::Success();
-    }
-    base::Status forward(const tensor::Tensor& input, const tensor::Tensor& pos,
-                         int& next) const override {
-        return base::error::Success();
-    }
-    int32_t post_processing(const tensor::Tensor& pos, bool is_prompt) const override {
-        return 0;
-    }
-
-    // [Fix] 显式构造 EmbeddingOutput
-    op::EmbeddingOutput embedding(const std::vector<int>& tokens) const override {
-        // 创建 3 个空的 dummy tensor
-        tensor::Tensor t1, t2, t3;
-        // 显式调用构造函数
-        return op::EmbeddingOutput(t1, t2, t3);
     }
 
     // ==========================================
