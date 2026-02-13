@@ -69,6 +69,51 @@ __global__ void rope_kernel_cu_fp32(int32_t total_tokens, int32_t dim,
   }
 }
 
+// [New] 预计算 Sin/Cos Kernel
+// Grid: (total_elements + 255) / 256
+// Block: 256
+__global__ void sin_cos_calc_kernel(int head_size, int max_seq_len,
+                                    float* sin_cache, float* cos_cache) {
+  // 展平索引：idx = pos * head_size + head_dim
+  int idx = threadIdx.x + blockDim.x * blockIdx.x;
+  int total_elements = head_size * max_seq_len;
+
+  if (idx >= total_elements) return;
+
+  // 反算出 pos 和 head_dim
+  int pos = idx / head_size;
+  int head_dim = idx % head_size;
+
+  // Llama RoPE 频率公式: theta = 10000 ^ (-2(i/2)/d)
+  // 关键: 使用 (head_dim / 2 * 2) 确保偶数对共享频率
+  float freq_exponent =
+      static_cast<float>(head_dim / 2 * 2) / static_cast<float>(head_size);
+  float freq = 1.0f / powf(10000.0f, freq_exponent);
+
+  float val = static_cast<float>(pos) * freq;
+
+  sin_cache[idx] = sinf(val);
+  cos_cache[idx] = cosf(val);
+}
+
+// Host 调用函数
+void sin_cos_cache_calc_cu(int head_size, int max_seq_len,
+                           const tensor::Tensor& sin_cache,
+                           const tensor::Tensor& cos_cache, void* stream) {
+  CHECK(!sin_cache.is_empty());
+  CHECK(!cos_cache.is_empty());
+
+  int total_elements = head_size * max_seq_len;
+  int threads = 256;
+  int blocks = (total_elements + threads - 1) / threads;
+
+  cudaStream_t cuda_stream = static_cast<cudaStream_t>(stream);
+
+  sin_cos_calc_kernel<<<blocks, threads, 0, cuda_stream>>>(
+      head_size, max_seq_len, const_cast<float*>(sin_cache.ptr<float>()),
+      const_cast<float*>(cos_cache.ptr<float>()));
+}
+
 void rope_kernel_cu(int32_t dim, int32_t kv_dim, int32_t head_size,
                     const tensor::Tensor& input_q,
                     const tensor::Tensor& input_k,
