@@ -107,7 +107,7 @@ aux_source_directory(src/engine DIR_ENGINE)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/lib)
 
 add_library(llama SHARED ${DIR_TENSOR} ${DIR_BASE} ${DIR_OP} ${DIR_KERNEL} ${DIR_MODEL} ${DIR_KERNEL_CPU} ${DIR_KERNEL_CUDA} ${DIR_KERNEL} ${DIR_SAMPLE} ${DIR_ENGINE})
-target_link_libraries(llama sentencepiece glog::glog gtest gtest_main pthread cudart armadillo OpenMP::OpenMP_CXX)
+target_link_libraries(llama sentencepiece glog::glog gtest gtest_main pthread cudart cublas armadillo OpenMP::OpenMP_CXX)
 target_link_directories(llama PUBLIC ${CMAKE_CUDA_COMPILER_LIBRARY_ROOT}/lib64)
 
 target_include_directories(llama PUBLIC ${glog_INCLUDE_DIR})
