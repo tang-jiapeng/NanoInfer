@@ -1,7 +1,9 @@
 #include "nanoinfer/sampler/argmax_sampler.h"
 #include <algorithm>
+#include "../op/kernels/kernels_interface.h"
 
 namespace sampler {
+// 弃用
 size_t ArgmaxSampler::sample(const float* logits, size_t size, void* stream) {
     if (device_type_ == base::DeviceType::kDeviceCPU) {
         size_t next = std::distance(logits, std::max_element(logits, logits + size));
@@ -15,35 +17,31 @@ size_t ArgmaxSampler::sample(const float* logits, size_t size, void* stream) {
 
 void ArgmaxSampler::sample_batched(const tensor::Tensor& logits, tensor::Tensor& output_ids,
                                    void* stream) {
-    // 维度检查
+    // 1. 维度检查
     CHECK_EQ(logits.dims_size(), 2) << "Logits tensor must be 2D [batch_size, vocab_size]";
     CHECK_EQ(output_ids.dims_size(), 1) << "Output tensor must be 1D [max_batch_size]";
 
     int32_t batch_size = logits.get_dim(0);
-    int32_t vocab_size = logits.get_dim(1);
+    // int32_t vocab_size = logits.get_dim(1); // Kernel 内部会获取
 
-    // 允许 output_ids 的容量 (max_batch_size) 大于当前 batch_size
+    // 容量检查
     CHECK_GE(output_ids.get_dim(0), batch_size)
         << "Output tensor size (" << output_ids.get_dim(0) << ") is smaller than batch size ("
         << batch_size << ")";
 
-    if (device_type_ == base::DeviceType::kDeviceCPU) {
-        const float* logits_ptr = logits.ptr<float>();
-        int32_t* output_ptr = output_ids.ptr<int32_t>();
+    // 2. 获取算子 (CPU 或 CUDA 由 Factory 决定)
+    kernel::ArgmaxKernel argmax_kernel = kernel::get_argmax_kernel(device_type_);
 
-        // 只遍历当前有效的 batch_size，不会越界
-        for (int i = 0; i < batch_size; ++i) {
-            const float* row_start = logits_ptr + i * vocab_size;
-            const float* row_end = row_start + vocab_size;
-
-            auto max_iter = std::max_element(row_start, row_end);
-            int32_t max_idx = static_cast<int32_t>(std::distance(row_start, max_iter));
-
-            output_ptr[i] = max_idx;
-        }
-    } else {
-        LOG(ERROR) << "ArgmaxSampler::sample_batched for GPU not implemented yet.";
+    if (!kernel) {
+        LOG(FATAL) << "Argmax kernel is not implemented or registered for device type: "
+                   << device_type_;
+        return;
     }
+
+    // 3. 执行算子
+    // 如果是 CPU，kernel 内部会忽略 stream 并同步执行
+    // 如果是 CUDA，kernel 内部会异步提交到 stream
+    argmax_kernel(logits, output_ids, stream);
 }
 
 }  // namespace sampler
