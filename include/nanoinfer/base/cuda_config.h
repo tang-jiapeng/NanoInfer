@@ -21,6 +21,7 @@ namespace kernel {
  * 最佳实践是使用 std::shared_ptr<CudaConfig> 进行管理和传递
  */
 struct CudaConfig {
+    cublasHandle_t cublas_handle;   ///< cuBLAS 句柄，供需要使用 cuBLAS 的 Kernel 使用
     cudaStream_t stream = nullptr;  ///< CUDA 流句柄，用于实现异步并行计算
 
     /**
@@ -32,6 +33,9 @@ struct CudaConfig {
     ~CudaConfig() {
         if (stream) {
             cudaStreamDestroy(stream);
+        }
+        if (cublas_handle) {
+            cublasDestroy(cublas_handle);
         }
     }
 };
