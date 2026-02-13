@@ -1,5 +1,6 @@
 #include "kernels_interface.h"
 #include "cpu/add_kernel.h"
+#include "cpu/argmax_kernel.h"
 #include "cpu/embedding_kernel.h"
 #include "cpu/matmul_kernel.h"
 #include "cpu/mha_kernel.h"
@@ -10,6 +11,7 @@
 #include "cpu/softmax_kernel.h"
 #include "cpu/swiglu_kernel.h"
 #include "cuda/add_kernel.cuh"
+#include "cuda/argmax_kernel.cuh"
 #include "cuda/embedding_kernel.cuh"
 #include "cuda/matmul_kernel.cuh"
 #include "cuda/paged_attention_kernel.cuh"
@@ -144,6 +146,17 @@ PagedKVWriteKernel get_paged_kv_write_kernel(base::DeviceType device_type) {
         return paged_kv_write_kernel;
     } else {
         LOG(FATAL) << "Unknown device type for get a paged kv write kernel.";
+        return nullptr;
+    }
+}
+
+ArgmaxKernel get_argmax_kernel(base::DeviceType device_type) {
+    if (device_type == base::DeviceType::kDeviceCPU) {
+        return argmax_kernel_cpu;
+    } else if (device_type == base::DeviceType::kDeviceCUDA) {
+        return argmax_kernel_cu;
+    } else {
+        LOG(FATAL) << "Unknown device type for get an argmax kernel.";
         return nullptr;
     }
 }

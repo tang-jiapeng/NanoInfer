@@ -34,7 +34,7 @@ void ArgmaxSampler::sample_batched(const tensor::Tensor& logits, tensor::Tensor&
 
     if (!argmax_kernel) {
         LOG(FATAL) << "Argmax kernel is not implemented or registered for device type: "
-                   << device_type_;
+                   << static_cast<int>(device_type_);
         return;
     }
 
