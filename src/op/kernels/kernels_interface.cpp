@@ -10,12 +10,13 @@
 #include "cpu/softmax_kernel.h"
 #include "cpu/swiglu_kernel.h"
 #include "cuda/add_kernel.cuh"
-// #include "cuda/emb_kernel.cuh"
-// #include "cuda/matmul_kernel.cuh"
-// #include "cuda/mha_kernel.cuh"
-// #include "cuda/rmsnorm_kernel.cuh"
-// #include "cuda/rope_kernel.cuh"
-// #include "cuda/swiglu_kernel.cuh"
+#include "cuda/embedding_kernel.cuh"
+#include "cuda/matmul_kernel.cuh"
+#include "cuda/paged_attention_kernel.cuh"
+#include "cuda/paged_kv_write_kernel.cuh"
+#include "cuda/rmsnorm_kernel.cuh"
+#include "cuda/rope_kernel.cuh"
+#include "cuda/swiglu_kernel.cuh"
 
 namespace kernel {
 AddKernel get_add_kernel(base::DeviceType device_type) {
@@ -32,6 +33,8 @@ AddKernel get_add_kernel(base::DeviceType device_type) {
 EmbeddingKernel get_embedding_kernel(base::DeviceType device_type) {
     if (device_type == base::DeviceType::kDeviceCPU) {
         return embedding_kernel_cpu;
+    } else if (device_type == base::DeviceType::kDeviceCUDA) {
+        return embedding_kernel_cu;
     } else {
         LOG(FATAL) << "Unknown device type for get a embedding kernel.";
         return nullptr;
@@ -41,6 +44,8 @@ EmbeddingKernel get_embedding_kernel(base::DeviceType device_type) {
 MatmulKernel get_matmul_kernel(base::DeviceType device_type) {
     if (device_type == base::DeviceType::kDeviceCPU) {
         return matmul_kernel_cpu;
+    } else if (device_type == base::DeviceType::kDeviceCUDA) {
+        return matmul_kernel_cu;
     } else {
         LOG(FATAL) << "Unknown device type for get a matmul kernel.";
         return nullptr;
@@ -68,6 +73,8 @@ MHAKernel get_mha_kernel(base::DeviceType device_type) {
 RoPEKernel get_rope_kernel(base::DeviceType device_type) {
     if (device_type == base::DeviceType::kDeviceCPU) {
         return rope_kernel_cpu;
+    } else if (device_type == base::DeviceType::kDeviceCUDA) {
+        return rope_kernel_cu;
     } else {
         LOG(FATAL) << "Unknown device type for get a rope kernel.";
         return nullptr;
@@ -95,6 +102,8 @@ SoftmaxKernel get_softmax_kernel(base::DeviceType device_type) {
 SwigluKernel get_swiglu_kernel(base::DeviceType device_type) {
     if (device_type == base::DeviceType::kDeviceCPU) {
         return swiglu_kernel_cpu;
+    } else if (device_type == base::DeviceType::kDeviceCUDA) {
+        return swiglu_kernel_cu;
     } else {
         LOG(FATAL) << "Unknown device type for get a swiglu kernel.";
         return nullptr;
@@ -104,6 +113,8 @@ SwigluKernel get_swiglu_kernel(base::DeviceType device_type) {
 RMSNormKernel get_rmsnorm_kernel(base::DeviceType device_type) {
     if (device_type == base::DeviceType::kDeviceCPU) {
         return rmsnorm_kernel_cpu;
+    } else if (device_type == base::DeviceType::kDeviceCUDA) {
+        return rmsnorm_kernel_cu;
     } else {
         LOG(FATAL) << "Unknown device type for get a rmsnorm kernel.";
         return nullptr;
@@ -119,4 +130,21 @@ ScaleSumKernel get_scale_sum_kernel(base::DeviceType device_type) {
     }
 }
 
+PagedAttentionKernel get_paged_attention_kernel(base::DeviceType device_type) {
+    if (device_type == base::DeviceType::kDeviceCUDA) {
+        return paged_attention_kernel;
+    } else {
+        LOG(FATAL) << "Unknown device type for get a paged attention kernel.";
+        return nullptr;
+    }
+}
+
+PagedKVWriteKernel get_paged_kv_write_kernel(base::DeviceType device_type) {
+    if (device_type == base::DeviceType::kDeviceCUDA) {
+        return paged_kv_write_kernel;
+    } else {
+        LOG(FATAL) << "Unknown device type for get a paged kv write kernel.";
+        return nullptr;
+    }
+}
 }  // namespace kernel

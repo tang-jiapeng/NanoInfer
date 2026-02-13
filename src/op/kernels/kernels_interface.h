@@ -130,6 +130,52 @@ typedef void (*ScaleSumKernel)(const tensor::Tensor& value, const tensor::Tensor
                                const tensor::Tensor& output, int t, int size, int stride,
                                void* stream);
 
+/**
+ * @brief Paged KV Cache 写入 Kernel 协议
+ * 将当前的 Key 和 Value 写入到全局的不连续 KV Cache 中。
+ *
+ * @param k 当前步生成的 Key [batch_size, num_kv_heads, head_size]
+ * @param v 当前步生成的 Value [batch_size, num_kv_heads, head_size]
+ * @param k_cache 全局 Key Cache [num_blocks, block_size, num_kv_heads, head_size]
+ * @param v_cache 全局 Value Cache [num_blocks, block_size, num_kv_heads, head_size]
+ * @param block_table 块映射表 [batch_size, max_blocks_per_seq]
+ * @param input_pos 当前 Token 的位置索引 [batch_size] (用于计算 block_idx 和 offset)
+ */
+typedef void (*PagedKVWriteKernel)(const tensor::Tensor& k, const tensor::Tensor& v,
+                                   const tensor::Tensor& k_cache, const tensor::Tensor& v_cache,
+                                   const tensor::Tensor& block_table,
+                                   const tensor::Tensor& input_pos, int32_t num_kv_heads,
+                                   int32_t head_size, int32_t block_size, void* stream);
+
+/**
+ * @brief Paged Attention Kernel 协议
+ * 基于 Block Table 计算注意力分数。
+ *
+ * @param query 当前步的 Query [batch_size, num_heads, head_size]
+ * @param output 输出 Tensor [batch_size, num_heads, head_size]
+ * @param k_cache 全局 Key Cache
+ * @param v_cache 全局 Value Cache
+ * @param block_table 块映射表
+ * @param context_lens 每个请求的实际上下文长度 [batch_size] (用于 Masking)
+ * @param max_context_len Batch 中最大的上下文长度 (用于 Grid 配置)
+ * @param scale Attention 缩放因子 (1/sqrt(head_size))
+ */
+typedef void (*PagedAttentionKernel)(const tensor::Tensor& query, const tensor::Tensor& output,
+                                     const tensor::Tensor& k_cache, const tensor::Tensor& v_cache,
+                                     const tensor::Tensor& block_table,
+                                     const tensor::Tensor& context_lens, int32_t max_context_len,
+                                     int32_t num_heads, int32_t num_kv_heads, int32_t head_size,
+                                     int32_t block_size, float scale, void* stream);
+
+/**
+ * @brief Batched Argmax Kernel 协议
+ * 对每一行寻找最大值的索引。
+ *
+ * @param input 输入 Logits [batch_size, vocab_size]
+ * @param output 输出 Token IDs [batch_size] (int32 或 int64)
+ */
+typedef void (*ArgmaxKernel)(const tensor::Tensor& input, const tensor::Tensor& output,
+                             void* stream);
 
 // -----------------------------------------------------------------------
 // 工厂函数声明 (Factory Functions)
@@ -157,6 +203,12 @@ SoftmaxKernel get_softmax_kernel(base::DeviceType device_type);
 SwigluKernel get_swiglu_kernel(base::DeviceType device_type);
 
 ScaleSumKernel get_scale_sum_kernel(base::DeviceType device_type);
+
+PagedKVWriteKernel get_paged_kv_write_kernel(base::DeviceType device_type);
+
+PagedAttentionKernel get_paged_attention_kernel(base::DeviceType device_type);
+
+ArgmaxKernel get_argmax_kernel(base::DeviceType device_type);
 
 }  // namespace kernel
 

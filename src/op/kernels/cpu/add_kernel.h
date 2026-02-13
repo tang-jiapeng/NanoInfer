@@ -1,5 +1,5 @@
-#ifndef KUIPER_INCLUDE_OP_KERNEL
-#define KUIPER_INCLUDE_OP_KERNEL
+#ifndef NANO_INFER_ADD_KERNEL_H
+#define NANO_INFER_ADD_KERNEL_H
 #include "nanoinfer/tensor/tensor.h"
 
 namespace kernel {
