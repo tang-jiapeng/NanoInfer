@@ -32,7 +32,7 @@ void ArgmaxSampler::sample_batched(const tensor::Tensor& logits, tensor::Tensor&
     // 2. 获取算子 (CPU 或 CUDA 由 Factory 决定)
     kernel::ArgmaxKernel argmax_kernel = kernel::get_argmax_kernel(device_type_);
 
-    if (!kernel) {
+    if (!argmax_kernel) {
         LOG(FATAL) << "Argmax kernel is not implemented or registered for device type: "
                    << device_type_;
         return;
