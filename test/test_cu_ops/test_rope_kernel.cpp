@@ -114,3 +114,65 @@ TEST_F(RoPEKernelTest, CompareCpuWithGpu) {
     EXPECT_NEAR(res_q_cpu[4], -2.0f, 1e-4);
     EXPECT_NEAR(res_q_cpu[5], 2.0f, 1e-4);
 }
+
+TEST_F(RoPEKernelTest, SinCosCacheGeneration) {
+    // 参数设置 (模拟 Llama-2-7b 配置)
+    int32_t head_size = 128;
+    int32_t max_seq_len = 256;  // 测试 256 个位置足够验证逻辑
+    int32_t total_elements = head_size * max_seq_len;
+
+    // 1. 创建 GPU Tensors
+    tensor::Tensor t_sin(base::DataType::kDataTypeFp32, max_seq_len, head_size, true, gpu_alloc_);
+    tensor::Tensor t_cos(base::DataType::kDataTypeFp32, max_seq_len, head_size, true, gpu_alloc_);
+
+    // 2. 运行 GPU Kernel (生成表)
+    kernel::sin_cos_cache_calc_cu(head_size, max_seq_len, t_sin, t_cos, nullptr);
+    cudaDeviceSynchronize();
+
+    // 3. 拷贝回 CPU
+    std::vector<float> h_sin_gpu(total_elements);
+    std::vector<float> h_cos_gpu(total_elements);
+
+    cudaMemcpy(h_sin_gpu.data(), t_sin.ptr<void>(), total_elements * sizeof(float),
+               cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_cos_gpu.data(), t_cos.ptr<void>(), total_elements * sizeof(float),
+               cudaMemcpyDeviceToHost);
+
+    // 4. CPU 黄金标准计算 (Golden Baseline)
+    for (int pos = 0; pos < max_seq_len; ++pos) {
+        for (int i = 0; i < head_size; ++i) {
+            // Llama 频率计算公式
+            // 关键验证点: (i / 2 * 2) 确保相邻两维频率一致
+            float freq_exponent = static_cast<float>(i / 2 * 2) / static_cast<float>(head_size);
+            float freq = 1.0f / std::pow(10000.0f, freq_exponent);
+            float val = static_cast<float>(pos) * freq;
+
+            float expected_sin = std::sin(val);
+            float expected_cos = std::cos(val);
+
+            // 获取 GPU 结果
+            int idx = pos * head_size + i;
+            float gpu_sin = h_sin_gpu[idx];
+            float gpu_cos = h_cos_gpu[idx];
+
+            // 验证误差
+            EXPECT_NEAR(gpu_sin, expected_sin, 1e-4)
+                << "Sin mismatch at pos=" << pos << ", dim=" << i;
+            EXPECT_NEAR(gpu_cos, expected_cos, 1e-4)
+                << "Cos mismatch at pos=" << pos << ", dim=" << i;
+        }
+    }
+
+    // 5. 额外验证 Llama 特性：相邻维度频率是否相同
+    // 检查 pos=1 时, dim=0 和 dim=1 的值是否符合旋转逻辑
+    // 对于 pos=1:
+    // dim 0: val = 1 * 10000^(-0/128) = 1.0
+    // dim 1: val = 1 * 10000^(-0/128) = 1.0 (应该与 dim 0 相同)
+    // dim 2: val = 1 * 10000^(-2/128)
+    int idx_0 = 1 * head_size + 0;
+    int idx_1 = 1 * head_size + 1;
+
+    // Sin(1.0) approx 0.8414
+    EXPECT_NEAR(h_sin_gpu[idx_0], h_sin_gpu[idx_1], 1e-6)
+        << "Llama property failed: Dim 0 and Dim 1 should share the same frequency/value";
+}
