@@ -4,6 +4,8 @@
 #include "model.h"
 #include "nanoinfer/base/base.h"
 #include "nanoinfer/op/layer.h"
+#include "nanoinfer/tensor/tensor.h"
+#include "nanoinfer/op/paged_attention.h"
 
 namespace model {
 
@@ -16,9 +18,8 @@ namespace model {
  */
 struct LLamaLayers {
     std::shared_ptr<op::Layer> add_layer_;     ///< 残差连接加法层 (Add)
-    std::shared_ptr<op::Layer> rope_layer_;    ///< 旋转位置编码层 (RoPE)
     std::shared_ptr<op::Layer> swiglu_layer_;  ///< FFN 激活层 (SwiGLU)
-    std::shared_ptr<op::Layer> mha_layer_;     ///< 多头注意力计算核心 (MHA)
+    std::shared_ptr<op::PagedAttention> paged_attn_layer_;  ///< ROPE + Paged Attention 
 
     // Attention 模块的线性投影层
     std::vector<std::shared_ptr<op::Layer>> wq_layers_;  ///< Query Projection
@@ -107,12 +108,17 @@ class LLamaModel : public Model {
      */
     void create_param_quant_layers() override;
 
-    base::Status embedding_batched(const std::vector<int32_t>& tokens, 
-                                   tensor::Tensor& embeddings);
+    /**
+     * @brief 预计算 RoPE 表 (Sin/Cos Cache)
+     */
+    void init_rope_cache();
 
    private:
     std::shared_ptr<kernel::CudaConfig> cuda_config_;  ///< CUDA 执行配置 (Stream)
     std::unique_ptr<LLamaLayers> llama_layers_;        ///< 所有算子的容器
+
+    tensor::Tensor sin_cache_;
+    tensor::Tensor cos_cache_;
 
     // KV Cache 引用 (由 Engine 分配，Model 持有引用)
     std::vector<tensor::Tensor> key_caches_;

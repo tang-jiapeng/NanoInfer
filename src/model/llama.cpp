@@ -1,11 +1,11 @@
 #include "nanoinfer/model/llama.h"
-#include <nanoinfer/op/matmul.h>
-#include <nanoinfer/op/rmsnorm.h>
-#include "../op/kernels/cpu/rope_kernel.h"
+#include "nanoinfer/op/matmul.h"
+#include "nanoinfer/op/rmsnorm.h"
+#include "../op/kernels/cuda/rope_kernel.cuh"
 #include "nanoinfer/op/add.h"
-#include "nanoinfer/op/mha.h"
 #include "nanoinfer/op/rope.h"
 #include "nanoinfer/op/swiglu.h"
+#include "nanoinfer/op/paged_attention.h"
 
 namespace model {
 
@@ -15,9 +15,10 @@ void LLamaLayers::to_cuda(std::shared_ptr<kernel::CudaConfig> config) {
         add_layer_->to_cuda();
     }
 
-    if (rope_layer_) {
-        rope_layer_->set_cuda_config(config);
-        rope_layer_->to_cuda();
+    // PagedAttention 负责 RoPE 和 Attention
+    if (paged_attn_layer_) {
+        paged_attn_layer_->set_cuda_config(config);
+        paged_attn_layer_->to_cuda();
     }
 
     if (swiglu_layer_) {
@@ -35,72 +36,70 @@ void LLamaLayers::to_cuda(std::shared_ptr<kernel::CudaConfig> config) {
         embedding_layer_->to_cuda();
     }
 
-    if (mha_layer_) {
-        mha_layer_->set_cuda_config(config);
-        mha_layer_->to_cuda();
-    }
-
-    for (auto& weight_layer : wq_layers_) {
-        if (weight_layer) {
-            weight_layer->set_cuda_config(config);
-            weight_layer->to_cuda();
+    auto to_cuda_vec = [&](auto& layers) {
+        for (auto& layer : layers) {
+            if (layer) {
+                layer->set_cuda_config(config);
+                layer->to_cuda();
+            }
         }
-    }
+    };
 
-    for (auto& weight_layer : wk_layers_) {
-        if (weight_layer) {
-            weight_layer->set_cuda_config(config);
-            weight_layer->to_cuda();
-        }
-    }
-
-    for (auto& weight_layer : wv_layers_) {
-        if (weight_layer) {
-            weight_layer->set_cuda_config(config);
-            weight_layer->to_cuda();
-        }
-    }
-
-    for (auto& weight_layer : wo_layers_) {
-        if (weight_layer) {
-            weight_layer->set_cuda_config(config);
-            weight_layer->to_cuda();
-        }
-    }
-
-    for (auto& weight_layer : w1_layers_) {
-        if (weight_layer) {
-            weight_layer->set_cuda_config(config);
-            weight_layer->to_cuda();
-        }
-    }
-
-    for (auto& weight_layer : w2_layers_) {
-        if (weight_layer) {
-            weight_layer->set_cuda_config(config);
-            weight_layer->to_cuda();
-        }
-    }
-
-    for (auto& weight_layer : w3_layers_) {
-        if (weight_layer) {
-            weight_layer->set_cuda_config(config);
-            weight_layer->to_cuda();
-        }
-    }
-
-    for (auto& rms_norm_layer : rmsnorm_layers_) {
-        if (rms_norm_layer) {
-            rms_norm_layer->to_cuda();
-            rms_norm_layer->set_cuda_config(config);
-        }
-    }
+    to_cuda_vec(wq_layers_);
+    to_cuda_vec(wk_layers_);
+    to_cuda_vec(wv_layers_);
+    to_cuda_vec(wo_layers_);
+    to_cuda_vec(w1_layers_);
+    to_cuda_vec(w2_layers_);
+    to_cuda_vec(w3_layers_);
+    to_cuda_vec(rmsnorm_layers_);
 }
 
 LLamaModel::LLamaModel(base::TokenizerType tokenizer_type, std::string token_path,
                        std::string model_path, bool is_quant_model)
     : Model(tokenizer_type, base::ModelType::kModelTypeLLama2, std::move(token_path),
             std::move(model_path), is_quant_model) {
+}
+
+void LLamaModel::init_rope_cache() {
+    int32_t head_size = config_->head_size_;
+    int32_t max_seq_len = config_->seq_len_;
+
+    std::shared_ptr<base::DeviceAllocator> allocator;
+    if (device_type_ == base::DeviceType::kDeviceCUDA) {
+        allocator = base::CUDADeviceAllocatorFactory::get_instance();
+    } else {
+        allocator = base::CPUDeviceAllocatorFactory::get_instance();
+    }
+
+    sin_cache_ =
+        tensor::Tensor(base::DataType::kDataTypeFp32, max_seq_len, head_size, true, allocator);
+    cos_cache_ =
+        tensor::Tensor(base::DataType::kDataTypeFp32, max_seq_len, head_size, true, allocator);
+
+    if (device_type_ == base::DeviceType::kDeviceCUDA) {
+        // 使用 GPU Kernel 直接在显存生成
+        // 获取当前流
+        void* stream = cuda_config_ ? cuda_config_->stream : nullptr;
+        kernel::sin_cos_cache_calc_cu(head_size, max_seq_len, sin_cache_, cos_cache_, stream);
+
+        cudaStreamSynchronize(static_cast<cudaStream_t>(stream));
+    } else {
+        // CPU 降级实现 (保持原来的逻辑，用于 CPU 推理)
+        std::vector<float> h_sin(max_seq_len * head_size);
+        std::vector<float> h_cos(max_seq_len * head_size);
+        for (int pos = 0; pos < max_seq_len; ++pos) {
+            for (int i = 0; i < head_size; ++i) {
+                float freq = 1.0f / std::pow(10000.0f, static_cast<float>(i / 2 * 2) /
+                                                           static_cast<float>(head_size));
+                float val = static_cast<float>(pos) * freq;
+                h_sin[pos * head_size + i] = std::sin(val);
+                h_cos[pos * head_size + i] = std::cos(val);
+            }
+        }
+        std::memcpy(sin_cache_.ptr<void>(), h_sin.data(), h_sin.size() * sizeof(float));
+        std::memcpy(cos_cache_.ptr<void>(), h_cos.data(), h_cos.size() * sizeof(float));
+    }
 }
 
 base::Status LLamaModel::init(base::DeviceType device_type) {
@@ -120,6 +119,7 @@ base::Status LLamaModel::init(base::DeviceType device_type) {
         cuda_config_ = std::make_shared<kernel::CudaConfig>();
 
         cudaStreamCreate(&cuda_config_->stream);
+        cublasCreate(&cuda_config_->cublas_handle);
         cudaError_t err = cudaGetLastError();
         if (err != cudaSuccess) {
             return base::error::InternalError("The cuda handle create failed.");
@@ -132,14 +132,18 @@ base::Status LLamaModel::init(base::DeviceType device_type) {
         return read_status;
     }
 
+    // 初始化 RoPE Cache
+    init_rope_cache();
+
+    // 将 RoPE Cache 注入到 PagedAttention
+    if (llama_layers_->paged_attn_layer_) {
+        llama_layers_->paged_attn_layer_->set_rope_cache(sin_cache_, cos_cache_);
+    }
+
     if (device_type == base::DeviceType::kDeviceCUDA) {
         // 将所有层迁移到 CUDA
         llama_layers_->to_cuda(cuda_config_);
     }
-
-    // 预计算 RoPE 表 (Sin/Cos Cache)
-    // 可以在这里计算，也可以在 RoPELayer 内部 Lazy Init
-    // 先占位
 
     return base::error::Success();
 }
@@ -163,7 +167,7 @@ base::Status LLamaModel::forward_batched(const ForwardBatch& input, tensor::Tens
     int32_t hidden_dim = config_->hidden_dim_;
     int32_t kv_dim = config_->kv_dim_;
 
-    // 获取分配器 (用于临时变量)
+    // 获取分配器
     std::shared_ptr<base::DeviceAllocator> allocator;
     if (device_type_ == base::DeviceType::kDeviceCUDA) {
         allocator = base::CUDADeviceAllocatorFactory::get_instance();
@@ -171,24 +175,52 @@ base::Status LLamaModel::forward_batched(const ForwardBatch& input, tensor::Tens
         allocator = base::CPUDeviceAllocatorFactory::get_instance();
     }
 
+    // 输入数据准备 (Vector -> Tensor)
+
+    // A. 准备 Token IDs (用于 Embedding)
+    // 输入是 vector<int32>, 需要转为 Tensor [total_tokens]
+    tensor::Tensor input_tokens_tensor(base::DataType::kDataTypeInt32, total_tokens, true,
+                                       allocator);
+
+    // B. 准备 Positions (用于 RoPE)
+    // 输入是 vector<int32>, 需要转为 Tensor [total_tokens]
+    tensor::Tensor pos_tensor(base::DataType::kDataTypeInt32, total_tokens, true, allocator);
+
+    // C. 准备 Context Lens (用于 PagedAttention Masking)
+    // 输入是 vector<int32>, 需要转为 Tensor [batch_size]
+    tensor::Tensor ctx_lens_tensor(base::DataType::kDataTypeInt32, batch_size, true, allocator);
+
+    // D. 准备 Block Table (用于 PagedAttention)
+    const tensor::Tensor& block_table_tensor = input.block_table;
+    if (block_table_tensor.is_empty()) {
+        return base::error::InternalError("block_table is empty in ForwardBatch");
+    }
+
+    // 执行数据拷贝 (Host -> Device)
+    if (device_type_ == base::DeviceType::kDeviceCUDA) {
+        cudaStream_t stream = cuda_config_->stream;
+        // 拷贝 Tokens
+        cudaMemcpyAsync(input_tokens_tensor.ptr<void>(), input.token_ids.data(),
+                        total_tokens * sizeof(int32_t), cudaMemcpyHostToDevice, stream);
+        // 拷贝 Positions
+        cudaMemcpyAsync(pos_tensor.ptr<void>(), input.positions.data(),
+                        total_tokens * sizeof(int32_t), cudaMemcpyHostToDevice, stream);
+        // 拷贝 Context Lens
+        cudaMemcpyAsync(ctx_lens_tensor.ptr<void>(), input.context_lens.data(),
+                        batch_size * sizeof(int32_t), cudaMemcpyHostToDevice, stream);
+    } else {
+        // CPU 拷贝
+        std::memcpy(input_tokens_tensor.ptr<void>(), input.token_ids.data(),
+                    total_tokens * sizeof(int32_t));
+        std::memcpy(pos_tensor.ptr<void>(), input.positions.data(), total_tokens * sizeof(int32_t));
+        std::memcpy(ctx_lens_tensor.ptr<void>(), input.context_lens.data(),
+                    batch_size * sizeof(int32_t));
+    }
+
     // Embedding: Tokens -> Hidden States
     // hidden_states: [total_tokens, dim]
     tensor::Tensor hidden_states(base::DataType::kDataTypeFp32, total_tokens, dim, true, allocator);
-    STATUS_CHECK(embedding_batched(input.token_ids, hidden_states));
-
-    // 准备 RoPE 需要的 Position Tensor
-    // RoPE Layer 需要一个 Tensor 输入，我们需要将 std::vector<int32_t> 拷贝进去
-    tensor::Tensor pos_tensor(base::DataType::kDataTypeInt32, total_tokens, true, allocator);
-
-    if (device_type_ == base::DeviceType::kDeviceCUDA) {
-        // 异步拷贝: Host -> Device
-        cudaMemcpyAsync(pos_tensor.ptr<void>(), input.positions.data(),
-                        total_tokens * sizeof(int32_t), cudaMemcpyHostToDevice,
-                        cuda_config_->stream);
-    } else {
-        // CPU 拷贝
-        std::memcpy(pos_tensor.ptr<void>(), input.positions.data(), total_tokens * sizeof(int32_t));
-    }
+    STATUS_CHECK(llama_layers_->embedding_layer_->forward(input_tokens_tensor, hidden_states));
 
     // 分配层间临时 Tensor
 
@@ -219,16 +251,28 @@ base::Status LLamaModel::forward_batched(const ForwardBatch& input, tensor::Tens
         STATUS_CHECK(llama_layers_->wk_layers_[i]->forward(norm_out, k));
         STATUS_CHECK(llama_layers_->wv_layers_[i]->forward(norm_out, v));
 
-        // A3. RoPE (In-place on Q and K)
-        // TODO: RoPE Layer 需要支持 batch pos_tensor; layer 内部处理或不使用外部 cache
-        tensor::Tensor dummy_cache;
-        STATUS_CHECK(
-            llama_layers_->rope_layer_->forward(q, k, pos_tensor, dummy_cache, dummy_cache));
+        // A3. Paged Attention (封装了 RoPE -> KV Write -> Attention)
+        auto& pa_layer = llama_layers_->paged_attn_layer_;
+        // 设置 Input
+        pa_layer->set_input(0, q);
+        pa_layer->set_input(1, k);
+        pa_layer->set_input(2, v);
+        // 直接传入 input.block_table (Tensor)
+        pa_layer->set_input(3, block_table_tensor);
+        pa_layer->set_input(4, ctx_lens_tensor);
+        pa_layer->set_input(5, pos_tensor);
 
-        // A4. Paged Attention
-        // 输入: Q, K, V, BlockTable, KVCache[i]
-        // 输出: attn_out
-        // TODO : 占位，未实现算子
+        pa_layer->set_output(0, attn_out);
+
+        // 切换当前层的 KV Cache
+        if (i < key_caches_.size() && i < value_caches_.size()) {
+            pa_layer->set_kv_cache(key_caches_[i], value_caches_[i]);
+        } else {
+            return base::error::InternalError("KV Cache not set or layer index out of bounds");
+        }
+
+        // 执行 Forward
+        STATUS_CHECK(pa_layer->forward());
 
         // A5. Residual Add (Attention)
         // hidden_states = hidden_states + attn_out
@@ -268,34 +312,17 @@ base::Status LLamaModel::forward_batched(const ForwardBatch& input, tensor::Tens
     return base::error::Success();
 }
 
-base::Status LLamaModel::embedding_batched(const std::vector<int32_t>& tokens,
-                                           tensor::Tensor& embeddings) {
-    // 构建临时 Input Tensor
-    std::shared_ptr<base::DeviceAllocator> alloc_cpu =
-        base::CPUDeviceAllocatorFactory::get_instance();
-    tensor::Tensor input_tokens(base::DataType::kDataTypeInt32, tokens.size(), true, alloc_cpu);
-    std::memcpy(input_tokens.ptr<void>(), tokens.data(), tokens.size() * sizeof(int32_t));
-    if (device_type_ == base::DeviceType::kDeviceCUDA) {
-        input_tokens.to_cuda(cuda_config_->stream);
-    }
-    STATUS_CHECK(llama_layers_->embedding_layer_->forward(input_tokens, embeddings));
-    return base::error::Success();
-}
-
 /**
  * @brief 创建无参数层 (Stateless Layers)
  * 这些层在所有 Block 间共享，或者没有权重状态。
  */
 void LLamaModel::create_nonparam_layers() {
     CHECK(llama_layers_ != nullptr);
-    // RoPE 层：处理位置编码
-    llama_layers_->rope_layer_ = std::make_shared<op::RoPELayer>(
-        device_type_, config_->dim_, config_->kv_dim_, config_->head_size_);
+    int32_t block_size = 16;
 
-    // MHA 层：处理 Attention 核心计算 (Softmax, Score)
-    llama_layers_->mha_layer_ = std::make_shared<op::MultiHeadAttention>(
-        device_type_, 0, config_->kv_mul_, config_->kv_dim_, config_->seq_len_, config_->head_num_,
-        config_->head_size_);
+    llama_layers_->paged_attn_layer_ =
+        std::make_shared<op::PagedAttention>(device_type_, 0, config_->kv_mul_, config_->kv_dim_,
+                                             config_->head_num_, config_->head_size_, block_size);
 
     // Add 层：处理残差连接
     llama_layers_->add_layer_ = std::make_shared<op::VecAddLayer>(device_type_);
@@ -586,53 +613,29 @@ base::Status LLamaModel::create_layers() {
         return error::InternalError("Create the rmsnorm layers for the llama model failed!");
     }
 
-    if (llama_layers_->wq_layers_.size() != config_->layer_num_ ||
-        llama_layers_->wk_layers_.size() != config_->layer_num_ ||
-        llama_layers_->wv_layers_.size() != config_->layer_num_ ||
-        llama_layers_->wo_layers_.size() != config_->layer_num_) {
-        return error::InternalError(
-            "Create the matmul layer in the attention and ffn attention layers for the "
-            "llama model "
-            "failed.");
-    }
+    // 校验 Matrix Layers
+    auto check_layers = [&](auto& layers, const char* name) -> base::Status {
+        if (layers.size() != config_->layer_num_)
+            return error::InternalError(std::string(name) + " size mismatch");
+        for (auto& l : layers)
+            if (!l) return error::InternalError(std::string(name) + " content missing");
+        return error::Success();
+    };
 
-    for (int32_t i = 0; i < config_->layer_num_; ++i) {
-        if (!llama_layers_->wq_layers_.at(i) || !llama_layers_->wk_layers_.at(i) ||
-            !llama_layers_->wv_layers_.at(i) || !llama_layers_->wo_layers_.at(i)) {
-            return error::InternalError(
-                "Create the matmul layer in the attention and ffn attention layers for "
-                "the llama model "
-                "failed.");
-        }
-    }
+    STATUS_CHECK(check_layers(llama_layers_->wq_layers_, "Wq"));
+    STATUS_CHECK(check_layers(llama_layers_->wk_layers_, "Wk"));
+    STATUS_CHECK(check_layers(llama_layers_->wv_layers_, "Wv"));
+    STATUS_CHECK(check_layers(llama_layers_->wo_layers_, "Wo"));
+    STATUS_CHECK(check_layers(llama_layers_->w1_layers_, "W1"));
+    STATUS_CHECK(check_layers(llama_layers_->w2_layers_, "W2"));
+    STATUS_CHECK(check_layers(llama_layers_->w3_layers_, "W3"));
 
-    if (llama_layers_->w1_layers_.size() != config_->layer_num_ ||
-        llama_layers_->w2_layers_.size() != config_->layer_num_ ||
-        llama_layers_->w3_layers_.size() != config_->layer_num_) {
-        return error::InternalError(
-            "Create the matmul layer in the feedforward layers for the llama model "
-            "failed.");
-    }
-
-    for (int32_t i = 0; i < config_->layer_num_; ++i) {
-        if (!llama_layers_->w1_layers_.at(i) || !llama_layers_->w2_layers_.at(i) ||
-            !llama_layers_->w3_layers_.at(i)) {
-            return error::InternalError(
-                "Create the matmul layer in the feedforward layers for the llama model "
-                "failed.");
-        }
-    }
-
-    if (!llama_layers_->rope_layer_) {
-        return error::InternalError("Create the rope layer for the llama model failed!");
+    if (!llama_layers_->paged_attn_layer_) {
+        return error::InternalError("Create the paged attention layer for the llama model failed!");
     }
 
     if (!llama_layers_->add_layer_) {
         return error::InternalError("Create the add layer for the llama model failed!");
-    }
-
-    if (!llama_layers_->mha_layer_) {
-        return error::InternalError("Create the mha layer for the llama model failed!");
     }
 
     if (!llama_layers_->swiglu_layer_) {
