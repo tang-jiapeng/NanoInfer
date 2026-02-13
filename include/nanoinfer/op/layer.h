@@ -25,6 +25,7 @@ enum class LayerType : uint8_t {
     kLayerSoftmax = 8,    ///< Softmax 激活
     kLayerAdd = 9,        ///< 逐元素加法
     kLayerSwiGLU = 10,    ///< SwiGLU 激活函数
+    kLayerPagedAttention = 11,  ///< 基于 vLLM 设计的 Paged Attention
 };
 
 /**
