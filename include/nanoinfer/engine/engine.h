@@ -113,24 +113,29 @@ class Engine {
     /**
      * @brief 执行一个 Batch 的计算
      * 将 Scheduler 输出的 ScheduledBatch 转换为 Model 需要的 ForwardBatch 格式
+     * 自动拆分 prefill 和 decode 请求，分别使用最优路径
      */
     base::Status execute_batch(const ScheduledBatch& batch);
 
     /**
-     * @brief 采样并处理结果
+     * @brief 执行单个请求的并行 Prefill
+     * 一次性处理所有 prompt tokens (使用 cuBLAS batched GEMM)
      *
-     * 1. 从 Logits 中采样 Next Token (Argmax/TopP)
-     * 2. 将生成的 Token 更新到 Request 中
-     * 3. 检查 Request 是否结束 (EOS/Length Limit)
-     * 4. 释放已结束 Request 的显存资源
-     * 5. 通知 Scheduler 更新状态
-     *
-     * @param logits 模型输出的 Logits [total_tokens, vocab_size]
-     * @param batch 当前 Batch 的请求信息
-     * @param seq_lens 每个请求在当前 Batch 中的 token 长度 (用于定位 Logits)
+     * @param req 待 prefill 的请求
+     * @param finished_ids [out] 若 prefill 后立即结束则追加 ID
      */
-    base::Status sample_and_update(const tensor::Tensor& logits, const ScheduledBatch& batch,
-                                   const std::vector<int32_t>& seq_lens);
+    base::Status execute_prefill_single(const InferenceRequestPtr& req,
+                                        std::vector<int64_t>& finished_ids);
+
+    /**
+     * @brief 批量执行 Decode
+     * 将所有 decode 请求组成 batch，共享一次 forward pass
+     *
+     * @param reqs decode 阶段的请求列表
+     * @param finished_ids [out] 本轮结束的请求 ID
+     */
+    base::Status execute_decode_batch(const std::vector<InferenceRequestPtr>& reqs,
+                                      std::vector<int64_t>& finished_ids);
 
     model::Model* model_;
     EngineConfig config_;
@@ -144,7 +149,7 @@ class Engine {
     bool initialized_ = false;
     std::atomic<bool> running_{false};
 
-    tensor::Tensor block_table_device_;  
+    tensor::Tensor block_table_device_;
     tensor::Tensor sampled_ids_device_;  // GPU 上的采样结果 (Kernel Output)
     tensor::Tensor sampled_ids_host_;    // CPU 上的采样结果 (Logic Input)
 };

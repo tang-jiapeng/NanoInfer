@@ -132,161 +132,176 @@ void Engine::stop() {
 }
 
 base::Status Engine::execute_batch(const ScheduledBatch& batch) {
-    // 构建 ForwardBatch 输入
-    model::ForwardBatch fwd_batch;
-    fwd_batch.batch_size = batch.size();
-
-    std::vector<int32_t> seq_lens_in_batch;
-    std::vector<int32_t> request_ids_vec;
-
-    // 预估容量
-    size_t est_total_tokens = batch.size() * config_.prefill_chunk_size;
-    fwd_batch.token_ids.reserve(est_total_tokens);
-    fwd_batch.positions.reserve(est_total_tokens);
-    fwd_batch.seq_ids.reserve(est_total_tokens);
-    fwd_batch.context_lens.reserve(batch.size());
+    // ======================================================================
+    // 拆分: Prefill 请求 vs Decode 请求
+    // ======================================================================
+    // Prefill: 使用并行 cuBLAS 路径, 每个请求独立处理 (所有 prompt tokens 一次性)
+    // Decode:  使用 PagedAttention kernel, 所有请求合并为一个 batch
+    std::vector<InferenceRequestPtr> prefill_reqs;
+    std::vector<InferenceRequestPtr> decode_reqs;
 
     for (const auto& req : batch.requests) {
-        std::vector<int32_t> tokens = req->get_next_chunk_tokens(config_.prefill_chunk_size);
-        std::vector<int32_t> positions = req->get_next_chunk_positions(config_.prefill_chunk_size);
-
-        int32_t chunk_len = static_cast<int32_t>(tokens.size());
-        seq_lens_in_batch.push_back(chunk_len);
-        request_ids_vec.push_back(static_cast<int32_t>(req->request_id()));
-
-        // PagedAttention 动态扩展
-        base::Status status =
-            kv_cache_manager_->extend_sequence(static_cast<int32_t>(req->request_id()), chunk_len);
-        if (!status) {
-            return status;  // OOM
+        if (req->is_prefill()) {
+            prefill_reqs.push_back(req);
+        } else {
+            decode_reqs.push_back(req);
         }
+    }
+
+    std::vector<int64_t> finished_ids;
+
+    // Phase 1: 并行 Prefill (逐请求, 但每个请求内部并行处理所有 tokens)
+    for (const auto& req : prefill_reqs) {
+        auto status = execute_prefill_single(req, finished_ids);
+        if (!status) return status;
+    }
+
+    // Phase 2: 批量 Decode
+    if (!decode_reqs.empty()) {
+        auto status = execute_decode_batch(decode_reqs, finished_ids);
+        if (!status) return status;
+    }
+
+    // Phase 3: 统一更新 Scheduler 状态
+    scheduler_->update_after_step(finished_ids);
+
+    return base::error::Success();
+}
+
+base::Status Engine::execute_prefill_single(const InferenceRequestPtr& req,
+                                            std::vector<int64_t>& finished_ids) {
+    int32_t request_id = static_cast<int32_t>(req->request_id());
+
+    // 获取所有剩余的 Prompt tokens (一次性处理)
+    int32_t remaining = req->prefill_remaining();
+    std::vector<int32_t> tokens = req->get_next_chunk_tokens(remaining);
+    std::vector<int32_t> positions = req->get_next_chunk_positions(remaining);
+    int32_t chunk_len = static_cast<int32_t>(tokens.size());
+
+    // 动态扩展 KV Cache
+    auto status = kv_cache_manager_->extend_sequence(request_id, chunk_len);
+    if (!status) return status;
+
+    // 构建 ForwardBatch (单序列, prefill 模式)
+    model::ForwardBatch fwd_batch;
+    fwd_batch.batch_size = 1;
+    fwd_batch.is_prefill = true;
+    fwd_batch.token_ids = std::move(tokens);
+    fwd_batch.positions = std::move(positions);
+    fwd_batch.context_lens = {req->num_computed_tokens() + chunk_len};
+    fwd_batch.max_context_len = fwd_batch.context_lens[0];
+
+    // Block Table
+    tensor::Tensor block_table_cpu;
+    status = kv_cache_manager_->get_block_table_tensor({request_id}, block_table_cpu);
+    if (!status) return status;
+
+    cudaMemcpyAsync(block_table_device_.ptr<void>(), block_table_cpu.ptr<void>(),
+                    block_table_cpu.byte_size(), cudaMemcpyHostToDevice);
+    fwd_batch.block_table = block_table_device_;
+
+    // Forward (输出 [chunk_len, vocab_size])
+    int32_t vocab_size = model_->config().vocab_size_;
+    tensor::Tensor logits(base::DataType::kDataTypeFp32, chunk_len, vocab_size, true, allocator_);
+    status = model_->forward_batched(fwd_batch, logits);
+    if (!status) return status;
+
+    // 只对最后一个 token 进行采样
+    tensor::Tensor last_logits(base::DataType::kDataTypeFp32, 1, vocab_size, true, allocator_);
+    int64_t last_offset = static_cast<int64_t>(chunk_len - 1) * vocab_size;
+    cudaMemcpyAsync(last_logits.ptr<float>(), logits.ptr<float>() + last_offset,
+                    vocab_size * sizeof(float), cudaMemcpyDeviceToDevice);
+
+    tensor::Tensor sampled_id(base::DataType::kDataTypeInt32, 1, true, allocator_);
+    sampler_->sample_batched(last_logits, sampled_id);
+
+    // D2H
+    int32_t next_token;
+    cudaMemcpy(&next_token, sampled_id.ptr<void>(), sizeof(int32_t), cudaMemcpyDeviceToHost);
+
+    // 更新 Request 状态: prefill 完成 + 添加第一个生成 token
+    req->add_computed_tokens(chunk_len);
+
+    int32_t eos_id = model_->config().eos_token_id_;
+    bool continue_gen = req->add_token(next_token, eos_id);
+    if (!continue_gen) {
+        finished_ids.push_back(req->request_id());
+        kv_cache_manager_->free_sequence(request_id);
+    }
+
+    return base::error::Success();
+}
+
+base::Status Engine::execute_decode_batch(const std::vector<InferenceRequestPtr>& reqs,
+                                          std::vector<int64_t>& finished_ids) {
+    int32_t batch_size = static_cast<int32_t>(reqs.size());
+    int32_t vocab_size = model_->config().vocab_size_;
+
+    // 构建 ForwardBatch (decode 模式: 每个请求 1 个 token)
+    model::ForwardBatch fwd_batch;
+    fwd_batch.batch_size = batch_size;
+    fwd_batch.is_prefill = false;
+    fwd_batch.token_ids.reserve(batch_size);
+    fwd_batch.positions.reserve(batch_size);
+    fwd_batch.context_lens.reserve(batch_size);
+
+    std::vector<int32_t> request_ids_vec;
+    request_ids_vec.reserve(batch_size);
+
+    for (const auto& req : reqs) {
+        int32_t request_id = static_cast<int32_t>(req->request_id());
+        request_ids_vec.push_back(request_id);
+
+        // Decode: 每次 1 个 token
+        std::vector<int32_t> tokens = req->get_next_chunk_tokens(1);
+        std::vector<int32_t> positions = req->get_next_chunk_positions(1);
 
         fwd_batch.token_ids.insert(fwd_batch.token_ids.end(), tokens.begin(), tokens.end());
         fwd_batch.positions.insert(fwd_batch.positions.end(), positions.begin(), positions.end());
 
-        for (int i = 0; i < chunk_len; ++i) {
-            fwd_batch.seq_ids.push_back(static_cast<int32_t>(req->request_id()));
-        }
+        // 扩展 KV Cache (decode 每次 +1)
+        auto status = kv_cache_manager_->extend_sequence(request_id, 1);
+        if (!status) return status;
 
-        // Context Length (用于 Attention Mask)
-        fwd_batch.context_lens.push_back(req->num_computed_tokens() + chunk_len);
+        // Context Length = 已计算 + 本次 1
+        fwd_batch.context_lens.push_back(req->num_computed_tokens() + 1);
         fwd_batch.max_context_len =
-            std::max(fwd_batch.max_context_len, req->num_computed_tokens() + chunk_len);
+            std::max(fwd_batch.max_context_len, req->num_computed_tokens() + 1);
     }
 
-    // 准备 Block Table (Host -> Device)
+    // Block Table
     tensor::Tensor block_table_cpu;
-    base::Status status =
-        kv_cache_manager_->get_block_table_tensor(request_ids_vec, block_table_cpu);
-    if (!status) {
-        return status;
-    }
-    if (block_table_device_.get_dim(1) < block_table_cpu.get_dim(1)) {
-        LOG(WARNING) << "Block table size mismatch, potential truncation";
-    }
-    // 拷贝 CPU Tensor -> GPU Tensor
-    size_t copy_size = block_table_cpu.byte_size();
+    auto status = kv_cache_manager_->get_block_table_tensor(request_ids_vec, block_table_cpu);
+    if (!status) return status;
 
-    if (block_table_device_.device_type() == base::DeviceType::kDeviceCUDA) {
-        cudaMemcpyAsync(block_table_device_.ptr<void>(), block_table_cpu.ptr<void>(), copy_size,
-                        cudaMemcpyHostToDevice);
-    } else {
-        // CPU 模式直接内存拷贝
-        memcpy(block_table_device_.ptr<void>(), block_table_cpu.ptr<void>(), copy_size);
-    }
-
-    // 将 GPU Tensor 赋值给 Input
+    cudaMemcpyAsync(block_table_device_.ptr<void>(), block_table_cpu.ptr<void>(),
+                    block_table_cpu.byte_size(), cudaMemcpyHostToDevice);
     fwd_batch.block_table = block_table_device_;
 
-    // Forward
-    int32_t total_tokens = static_cast<int32_t>(fwd_batch.token_ids.size());
-    int32_t vocab_size = model_->config().vocab_size_;
-
-    // Logits 分配在 Device 上
-    tensor::Tensor logits(base::DataType::kDataTypeFp32, total_tokens, vocab_size, true,
-                          allocator_);
+    // Forward (输出 [batch_size, vocab_size], 因为 decode 每请求 1 token)
+    tensor::Tensor logits(base::DataType::kDataTypeFp32, batch_size, vocab_size, true, allocator_);
     status = model_->forward_batched(fwd_batch, logits);
-    if (!status) {
-        return status;
-    }
+    if (!status) return status;
 
-    return sample_and_update(logits, batch, seq_lens_in_batch);
-}
+    // Batch Argmax — logits 已经是 [batch_size, vocab_size], 直接采样
+    tensor::Tensor sampled_ids_dev(base::DataType::kDataTypeInt32, batch_size, true, allocator_);
+    sampler_->sample_batched(logits, sampled_ids_dev);
 
-base::Status Engine::sample_and_update(const tensor::Tensor& logits, const ScheduledBatch& batch,
-                                       const std::vector<int32_t>& seq_lens) {
-    int32_t batch_size = batch.size();
-    int32_t vocab_size = model_->config().vocab_size_;
+    // D2H
+    std::vector<int32_t> next_tokens(batch_size);
+    cudaMemcpy(next_tokens.data(), sampled_ids_dev.ptr<void>(), batch_size * sizeof(int32_t),
+               cudaMemcpyDeviceToHost);
 
-    tensor::Tensor next_token_logits(base::DataType::kDataTypeFp32, batch_size, vocab_size, true,
-                                     allocator_);
-
-    if (logits.device_type() == base::DeviceType::kDeviceCUDA) {
-        int32_t token_offset = 0;
-        const float* src_ptr = logits.ptr<float>();
-        float* dst_ptr = next_token_logits.ptr<float>();
-
-        for (int i = 0; i < batch_size; ++i) {
-            int32_t len = seq_lens[i];
-            int32_t last_token_idx = token_offset + len - 1;
-
-            cudaMemcpyAsync(dst_ptr + i * vocab_size, src_ptr + last_token_idx * vocab_size,
-                            vocab_size * sizeof(float), cudaMemcpyDeviceToDevice);
-            token_offset += len;
-        }
-    } else {
-        int32_t token_offset = 0;
-        const float* src_ptr = logits.ptr<float>();
-        float* dst_ptr = next_token_logits.ptr<float>();
-        for (int i = 0; i < batch_size; ++i) {
-            int32_t len = seq_lens[i];
-            int32_t last_token_idx = token_offset + len - 1;
-            memcpy(dst_ptr + i * vocab_size, src_ptr + last_token_idx * vocab_size,
-                   vocab_size * sizeof(float));
-            token_offset += len;
-        }
-    }
-
-    // Batch Sample
-    sampler_->sample_batched(next_token_logits, sampled_ids_device_);
-
-    // D2H Copy
-    void* host_dst = sampled_ids_host_.ptr<void>();
-    const void* dev_src = sampled_ids_device_.ptr<void>();
-    size_t copy_size = sampled_ids_host_.byte_size();
-    if (sampled_ids_device_.device_type() == base::DeviceType::kDeviceCUDA) {
-        // 使用同步拷贝，确保数据到达 CPU 后再继续
-        cudaMemcpy(host_dst, dev_src, copy_size, cudaMemcpyDeviceToHost);
-    } else {
-        std::memcpy(host_dst, dev_src, copy_size);
-    }
-
-    // Update Requests
-    int32_t* output_ids = sampled_ids_host_.ptr<int32_t>();
-    std::vector<int64_t> finished_ids;
-
+    // 更新 Request 状态
+    int32_t eos_id = model_->config().eos_token_id_;
     for (int i = 0; i < batch_size; ++i) {
-        auto& req = batch.requests[i];
-        int32_t next_token = output_ids[i];
-
-        int32_t eos_id = model_->config().eos_token_id_;
-
-        if (req->is_prefill() && req->prefill_remaining() > 0) {
-            req->add_computed_tokens(seq_lens[i]);
-        } else {
-            if (req->is_prefill()) {
-                req->add_computed_tokens(seq_lens[i]);
-            }
-            bool continue_gen = req->add_token(next_token, eos_id);
-            if (!continue_gen) {
-                finished_ids.push_back(req->request_id());
-                kv_cache_manager_->free_sequence(static_cast<int32_t>(req->request_id()));
-            }
+        auto& req = reqs[i];
+        bool continue_gen = req->add_token(next_tokens[i], eos_id);
+        if (!continue_gen) {
+            finished_ids.push_back(req->request_id());
+            kv_cache_manager_->free_sequence(static_cast<int32_t>(req->request_id()));
         }
     }
-
-    // Update Scheduler
-    scheduler_->update_after_step(finished_ids);
 
     return base::error::Success();
 }
