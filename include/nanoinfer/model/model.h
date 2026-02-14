@@ -24,7 +24,8 @@ struct ForwardBatch {
     std::vector<int32_t> context_lens;
     int32_t max_context_len = 0;  ///< 当前 Batch 中最大的上下文长度 (用于 Kernel 配置)
 
-    int32_t batch_size = 0;  ///< 当前 Batch 的序列数量
+    int32_t batch_size = 0;   ///< 当前 Batch 的序列数量
+    bool is_prefill = false;  ///< 是否为 Prefill 阶段 (一次性处理所有 prompt tokens)
 };
 
 /**

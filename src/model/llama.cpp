@@ -148,17 +148,21 @@ base::Status LLamaModel::init(base::DeviceType device_type) {
     // Debug: Check RoPE Cache
     std::vector<float> sin_host(10);
     std::vector<float> cos_host(10);
-    
+
     if (device_type_ == base::DeviceType::kDeviceCUDA) {
-        cudaMemcpy(sin_host.data(), sin_cache_.ptr<float>(), 10 * sizeof(float), cudaMemcpyDeviceToHost);
-        cudaMemcpy(cos_host.data(), cos_cache_.ptr<float>(), 10 * sizeof(float), cudaMemcpyDeviceToHost);
+        cudaMemcpy(sin_host.data(), sin_cache_.ptr<float>(), 10 * sizeof(float),
+                   cudaMemcpyDeviceToHost);
+        cudaMemcpy(cos_host.data(), cos_cache_.ptr<float>(), 10 * sizeof(float),
+                   cudaMemcpyDeviceToHost);
     } else {
         memcpy(sin_host.data(), sin_cache_.ptr<float>(), 10 * sizeof(float));
         memcpy(cos_host.data(), cos_cache_.ptr<float>(), 10 * sizeof(float));
     }
 
-    LOG(INFO) << "RoPE Sin[0-4]: " << sin_host[0] << " " << sin_host[1] << " " << sin_host[2] << " " << sin_host[3];
-    LOG(INFO) << "RoPE Cos[0-4]: " << cos_host[0] << " " << cos_host[1] << " " << cos_host[2] << " " << cos_host[3];
+    LOG(INFO) << "RoPE Sin[0-4]: " << sin_host[0] << " " << sin_host[1] << " " << sin_host[2] << " "
+              << sin_host[3];
+    LOG(INFO) << "RoPE Cos[0-4]: " << cos_host[0] << " " << cos_host[1] << " " << cos_host[2] << " "
+              << cos_host[3];
 
     return base::error::Success();
 }
@@ -183,8 +187,8 @@ base::Status LLamaModel::forward_batched(const ForwardBatch& input, tensor::Tens
     int32_t kv_dim = config_->kv_dim_;
 
     // // [Debug Log]
-    // LOG(INFO) << "Forward Batched: total_tokens=" << total_tokens << ", batch_size=" << batch_size;
-
+    // LOG(INFO) << "Forward Batched: total_tokens=" << total_tokens << ", batch_size=" <<
+    // batch_size;
 
     // 获取分配器
     std::shared_ptr<base::DeviceAllocator> allocator;
@@ -272,6 +276,8 @@ base::Status LLamaModel::forward_batched(const ForwardBatch& input, tensor::Tens
 
         // A3. Paged Attention (封装了 RoPE -> KV Write -> Attention)
         auto& pa_layer = llama_layers_->paged_attn_layer_;
+        // 设置 Prefill / Decode 模式
+        pa_layer->set_prefill(input.is_prefill);
         // 设置 Input
         pa_layer->set_input(0, q);
         pa_layer->set_input(1, k);
@@ -297,8 +303,8 @@ base::Status LLamaModel::forward_batched(const ForwardBatch& input, tensor::Tens
         STATUS_CHECK(llama_layers_->wo_layers_[i]->forward(attn_out, norm_out));
 
         // A5. Residual Add (Attention)
-        // hidden_states = hidden_states + attn_out
-        STATUS_CHECK(llama_layers_->add_layer_->forward(hidden_states, attn_out, hidden_states));
+        // hidden_states = hidden_states + Wo(attn_out)
+        STATUS_CHECK(llama_layers_->add_layer_->forward(hidden_states, norm_out, hidden_states));
 
         // Part B: Feed-Forward Block (FFN)
 
