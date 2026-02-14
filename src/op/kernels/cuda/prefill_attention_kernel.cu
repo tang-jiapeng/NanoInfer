@@ -4,7 +4,7 @@
 
 #include <cfloat>
 #include <cmath>
-
+#include "nanoinfer/base/cuda_config.h"
 #include "prefill_attention_kernel.cuh"
 
 namespace kernel {
