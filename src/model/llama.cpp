@@ -1,11 +1,11 @@
 #include "nanoinfer/model/llama.h"
-#include "nanoinfer/op/matmul.h"
-#include "nanoinfer/op/rmsnorm.h"
 #include "../op/kernels/cuda/rope_kernel.cuh"
 #include "nanoinfer/op/add.h"
+#include "nanoinfer/op/matmul.h"
+#include "nanoinfer/op/paged_attention.h"
+#include "nanoinfer/op/rmsnorm.h"
 #include "nanoinfer/op/rope.h"
 #include "nanoinfer/op/swiglu.h"
-#include "nanoinfer/op/paged_attention.h"
 
 namespace model {
 
@@ -132,6 +132,11 @@ base::Status LLamaModel::init(base::DeviceType device_type) {
         return read_status;
     }
 
+    if (device_type == base::DeviceType::kDeviceCUDA) {
+        // 将所有层迁移到 CUDA
+        llama_layers_->to_cuda(cuda_config_);
+    }
+
     // 初始化 RoPE Cache
     init_rope_cache();
 
@@ -140,10 +145,20 @@ base::Status LLamaModel::init(base::DeviceType device_type) {
         llama_layers_->paged_attn_layer_->set_rope_cache(sin_cache_, cos_cache_);
     }
 
-    if (device_type == base::DeviceType::kDeviceCUDA) {
-        // 将所有层迁移到 CUDA
-        llama_layers_->to_cuda(cuda_config_);
+    // Debug: Check RoPE Cache
+    std::vector<float> sin_host(10);
+    std::vector<float> cos_host(10);
+    
+    if (device_type_ == base::DeviceType::kDeviceCUDA) {
+        cudaMemcpy(sin_host.data(), sin_cache_.ptr<float>(), 10 * sizeof(float), cudaMemcpyDeviceToHost);
+        cudaMemcpy(cos_host.data(), cos_cache_.ptr<float>(), 10 * sizeof(float), cudaMemcpyDeviceToHost);
+    } else {
+        memcpy(sin_host.data(), sin_cache_.ptr<float>(), 10 * sizeof(float));
+        memcpy(cos_host.data(), cos_cache_.ptr<float>(), 10 * sizeof(float));
     }
+
+    LOG(INFO) << "RoPE Sin[0-4]: " << sin_host[0] << " " << sin_host[1] << " " << sin_host[2] << " " << sin_host[3];
+    LOG(INFO) << "RoPE Cos[0-4]: " << cos_host[0] << " " << cos_host[1] << " " << cos_host[2] << " " << cos_host[3];
 
     return base::error::Success();
 }
@@ -166,6 +181,10 @@ base::Status LLamaModel::forward_batched(const ForwardBatch& input, tensor::Tens
     int32_t dim = config_->dim_;
     int32_t hidden_dim = config_->hidden_dim_;
     int32_t kv_dim = config_->kv_dim_;
+
+    // // [Debug Log]
+    // LOG(INFO) << "Forward Batched: total_tokens=" << total_tokens << ", batch_size=" << batch_size;
+
 
     // 获取分配器
     std::shared_ptr<base::DeviceAllocator> allocator;
@@ -273,6 +292,9 @@ base::Status LLamaModel::forward_batched(const ForwardBatch& input, tensor::Tens
 
         // 执行 Forward
         STATUS_CHECK(pa_layer->forward());
+
+        // Wo: Input=attn_out, Output=norm_out
+        STATUS_CHECK(llama_layers_->wo_layers_[i]->forward(attn_out, norm_out));
 
         // A5. Residual Add (Attention)
         // hidden_states = hidden_states + attn_out

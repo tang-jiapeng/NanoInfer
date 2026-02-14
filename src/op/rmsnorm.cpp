@@ -10,34 +10,31 @@ RmsNormLayer::RmsNormLayer(base::DeviceType device_type, int32_t dim)
 }
 
 base::Status RmsNormLayer::check() const {
-    int32_t dim_size = get_input(0).dims_size();
-    if (dim_size > 1) {
-        int dim_head_size = get_input(0).get_dim(dim_size - 1);
-        if (dim_head_size == dim_) {
-            return base::error::Success();
-        } else {
-            return base::error::InvalidArgument("The tensor has a wrong dim in dim -1");
-        }
-    } else {
-        auto status = check_tensor_with_dim(get_input(0), device_type_, data_type_, dim_);
-        if (!status) {
-            LOG(ERROR) << "The input tensor error in the rmsnorm layer.";
-            return status;
-        }
+    const auto& input = get_input(0);
+    const auto& output = get_output(0);
 
-        status = check_tensor_with_dim(get_weight(0), device_type_, data_type_, dim_);
-        if (!status) {
-            LOG(ERROR) << "The weight tensor error in the rmsnorm layer.";
-            return status;
-        }
+    // 基础检查
+    if (input.is_empty() || output.is_empty()) return base::error::InvalidArgument("Tensor empty");
+    if (input.device_type() != device_type_ || output.device_type() != device_type_)
+        return base::error::InvalidArgument("Device mismatch");
 
-        status = check_tensor_with_dim(get_output(0), device_type_, data_type_, dim_);
-        if (!status) {
-            LOG(ERROR) << "The output tensor error in the rmsnorm layer.";
-            return status;
-        }
-        return base::error::Success();
+    // 维度检查
+    // 输入至少 2D [Batch*Seq, Hidden]
+    if (input.dims_size() < 1) return base::error::InvalidArgument("Dims size error");
+
+    // 检查最后一维是否等于 dim_ (初始化参数)
+    int32_t last_dim = input.get_dim(input.dims_size() - 1);
+    if (last_dim != dim_) {
+        LOG(ERROR) << "RMSNorm input last dim mismatch. Expected " << dim_ << " got " << last_dim;
+        return base::error::InvalidArgument("RMSNorm dimension mismatch");
     }
+
+    // 输出检查
+    if (output.size() != input.size()) {
+        return base::error::InvalidArgument("Output size mismatch");
+    }
+
+    return base::error::Success();
 }
 
 base::Status RmsNormLayer::forward() {

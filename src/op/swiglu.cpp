@@ -10,23 +10,23 @@ SwiGLULayer::SwiGLULayer(base::DeviceType device_type, int32_t hidden_dim)
 }
 
 base::Status SwiGLULayer::check() const {
-    base::Status status;
-    constexpr int32_t input_tensor_num = 2;
-    for (int32_t i = 0; i < input_tensor_num; ++i) {
-        status =
-            check_tensor_with_dim(get_input(0), device_type_, data_type_, hidden_dim_);
-        if (!status) {
-            LOG(ERROR) << "The input tensor " << std::to_string(i)
-                       << " error in the swiglu layer.";
-            return status;
-        }
+    const auto& input1 = get_input(0);
+    const auto& input2 = get_input(1);
+    const auto& output = get_output(0);
+
+    if (input1.is_empty() || input2.is_empty() || output.is_empty())
+        return base::error::InvalidArgument("Tensor empty");
+
+    // 检查两个输入形状是否一致
+    if (input1.size() != input2.size()) {
+        return base::error::InvalidArgument("SwiGLU inputs size mismatch");
     }
 
-    status = check_tensor_with_dim(get_output(0), device_type_, data_type_, hidden_dim_);
-    if (!status) {
-        LOG(ERROR) << "The output tensor error in the swiglu layer.";
-        return status;
+    // 检查 hidden_dim_ (虽然 SwiGLU 计算是逐元素的，但通常最后一维是 hidden_dim)
+    if (output.size() != input1.size()) {
+        return base::error::InvalidArgument("SwiGLU output size mismatch");
     }
+
     return base::error::Success();
 }
 
@@ -41,8 +41,8 @@ base::Status SwiGLULayer::forward() {
     if (device_type_ == base::DeviceType::kDeviceCUDA) {
         CHECK(cuda_config_ != nullptr);
     }
-    kernel::get_swiglu_kernel(device_type_)(
-        input1, input2, output, cuda_config_ ? cuda_config_->stream : nullptr);
+    kernel::get_swiglu_kernel(device_type_)(input1, input2, output,
+                                            cuda_config_ ? cuda_config_->stream : nullptr);
     return base::error::Success();
 }
 

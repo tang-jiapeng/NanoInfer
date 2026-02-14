@@ -7,7 +7,7 @@ int main(int argc, char* argv[]) {
     FLAGS_log_dir = "./log/";
     FLAGS_alsologtostderr = true;
 
-    testing::GTEST_FLAG(filter) = "RoPEKernelTest.*";
+    testing::GTEST_FLAG(filter) = "TinyLlamaTest.*";
 
     FLAGS_v = 2;
 

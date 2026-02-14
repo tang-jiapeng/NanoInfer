@@ -1,0 +1,1 @@
+python export_llama2.py  llama2_fp32.bin --hf ../models/llama2  --version 0 --dtype fp32

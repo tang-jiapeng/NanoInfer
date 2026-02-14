@@ -1,0 +1,15 @@
+------------------------------
+Model File: ../../models/llama2/llama2_fp32.bin
+------------------------------
+Dim (Hidden Size):    2048
+Hidden Dim (Inter):   5632
+Layers:               22
+Heads (Query):        32
+KV Heads (GQA):       4
+Vocab Size:           -32000
+Seq Len:              2048
+------------------------------
+First 5 weights (Embedding): 
+(6.288290023803711e-06, 4.351139068603516e-06, 4.32133674621582e-06, 9.655952453613281e-06, 4.798173904418945e-06)
+------------------------------
+✅ TinyLlama metadata check passed!

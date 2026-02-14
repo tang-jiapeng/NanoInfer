@@ -49,3 +49,6 @@ build/
 build/log/
 
 models/
+
+__pycache__/
+log/

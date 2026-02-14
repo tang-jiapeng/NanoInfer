@@ -9,27 +9,38 @@ VecAddLayer::VecAddLayer(base::DeviceType device_type)
 }
 
 base::Status VecAddLayer::check() const {
-    tensor::Tensor input1 = this->get_input(0);
-    tensor::Tensor input2 = this->get_input(1);
-    int32_t size = input1.size();
-    base::Status status;
-    status = check_tensor_with_dim(input1, device_type_, data_type_, size);
-    if (!status) {
-        LOG(ERROR) << "The input tensor 1 error in the add layer.";
-        return status;
+    const auto& input1 = get_input(0);
+    const auto& input2 = get_input(1);
+    const auto& output = get_output(0);
+
+    // 判空
+    if (input1.is_empty() || input2.is_empty() || output.is_empty()) {
+        return base::error::InvalidArgument("Input or Output tensors are empty in AddLayer");
     }
 
-    status = check_tensor_with_dim(input2, device_type_, data_type_, size);
-    if (!status) {
-        LOG(ERROR) << "The input tensor 2 error in the add layer.";
-        return status;
+    // 检查设备与类型
+    if (input1.device_type() != device_type_ || input2.device_type() != device_type_ ||
+        output.device_type() != device_type_) {
+        return base::error::InvalidArgument("Device type mismatch in AddLayer");
+    }
+    if (input1.data_type() != data_type_ || input2.data_type() != data_type_ ||
+        output.data_type() != data_type_) {
+        return base::error::InvalidArgument("Data type mismatch in AddLayer");
     }
 
-    status = check_tensor_with_dim(get_output(0), device_type_, data_type_, size);
-    if (!status) {
-        LOG(ERROR) << "The output tensor error in the add layer.";
-        return status;
+    // 检查形状一致性
+    if (input1.size() != input2.size()) {
+        LOG(ERROR) << "Input tensor sizes mismatch in AddLayer: " << input1.size() << " vs "
+                   << input2.size();
+        return base::error::InvalidArgument("Input tensor size mismatch");
     }
+
+    // 检查输出形状
+    if (output.size() != input1.size()) {
+        LOG(ERROR) << "Output tensor size mismatch in AddLayer";
+        return base::error::InvalidArgument("Output tensor size mismatch");
+    }
+
     return base::error::Success();
 }
 

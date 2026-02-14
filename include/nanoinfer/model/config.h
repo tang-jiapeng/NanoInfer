@@ -12,8 +12,7 @@ namespace model {
  * 这些参数直接来自模型文件或配置文件的解析。
  *
  * @note
- * 所有维度参数均为非负整数，默认初始化为 0。
- * 实际使用前应确保这些参数已被正确填充。
+ * 所有维度参数均为非负整数，默认初始化为 0
  */
 struct ModelConfig {
     int32_t dim = 0;          ///< 模型嵌入维度 (embedding dimension)，通常为 4096
@@ -23,10 +22,6 @@ struct ModelConfig {
     int32_t kv_head_num = 0;  ///< Key/Value 的头数 (用于 Group Query Attention)
     int32_t vocab_size = 0;   ///< 词汇表大小，通常为 32000+
     int32_t seq_len = 0;      ///< 最大序列长度 (context length)，通常为 512-4096
-
-    // 特殊 Token ID
-    int32_t bos_token_id = -1;
-    int32_t eos_token_id = -1;
 };
 
 /**
@@ -36,7 +31,6 @@ struct ModelConfig {
  * 这些参数在模型初始化时根据 ModelConfig 自动计算，提供给各个算子使用。
  *
  * @note
- * 所有参数均通过 ModelConfig 推导而来，不应手动修改。
  * 推导规则：
  * - kv_dim_ = dim * kv_head_num / head_num（Key/Value 的实际维度）
  * - kv_mul_ = head_num / kv_head_num（用于 Attention 计算中的多重性）

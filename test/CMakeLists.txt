@@ -8,8 +8,9 @@ aux_source_directory(../test DIR_TEST)
 aux_source_directory(../test/test_tensor DIR_TEST_TENSOR)
 aux_source_directory(../test/test_engine DIR_TEST_ENGINE)
 aux_source_directory(../test/test_cu_ops DIR_TEST_CU_OPS)
+aux_source_directory(../test/test_model DIR_TEST_MODEL)
 
-add_executable(test_llm ${DIR_TEST} ${DIR_TEST_TENSOR} ${DIR_TEST_ENGINE} ${DIR_TEST_CU_OPS})
+add_executable(test_llm ${DIR_TEST} ${DIR_TEST_TENSOR} ${DIR_TEST_ENGINE} ${DIR_TEST_CU_OPS} ${DIR_TEST_MODEL})
 
 #set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -g -G")
 target_link_libraries(test_llm ${link_ext_lib})

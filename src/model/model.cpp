@@ -108,8 +108,9 @@ base::Status Model::generate_model_infos(const ModelConfig& config) const {
     config_->kv_head_num_ = config.kv_head_num;
     config_->seq_len_ = config.seq_len;
 
-    config_->bos_token_id_ = config.bos_token_id;
-    config_->eos_token_id_ = config.eos_token_id;
+    // Llama 2 的标准: BOS=1, EOS=2
+    config_->bos_token_id_ = 1;
+    config_->eos_token_id_ = 2;
 
     config_->kv_dim_ = (config.dim * config.kv_head_num) / config.head_num;
     config_->kv_mul_ = config.head_num / config.kv_head_num;
