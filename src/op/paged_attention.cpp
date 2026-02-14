@@ -1,4 +1,5 @@
 #include "nanoinfer/op/paged_attention.h"
+#include "kernels/cuda/prefill_attention_kernel.cuh"
 #include "kernels/kernels_interface.h"
 
 namespace op {
@@ -58,17 +59,21 @@ void PagedAttention::set_rope_cache(const tensor::Tensor& sin_cache,
     cos_cache_ = cos_cache;
 }
 
+void PagedAttention::set_prefill(bool is_prefill) {
+    is_prefill_ = is_prefill;
+}
+
 base::Status PagedAttention::forward() {
     auto status = check();
     if (!status) return status;
 
     // 1. 获取输入 Tensors
-    const auto& query = get_input(0);         // [batch, num_heads, head_dim]
-    const auto& key = get_input(1);           // [batch, num_kv_heads, head_dim]
-    const auto& value = get_input(2);         // [batch, num_kv_heads, head_dim]
+    const auto& query = get_input(0);         // [total_tokens, num_heads * head_dim]
+    const auto& key = get_input(1);           // [total_tokens, num_kv_heads * head_dim]
+    const auto& value = get_input(2);         // [total_tokens, num_kv_heads * head_dim]
     const auto& block_table = get_input(3);   // [batch, max_blocks]
     const auto& context_lens = get_input(4);  // [batch] (int32)
-    const auto& input_pos = get_input(5);     // [batch] (int32)
+    const auto& input_pos = get_input(5);     // [total_tokens] (int32)
 
     auto& output = get_output(0);
 
@@ -76,17 +81,12 @@ base::Status PagedAttention::forward() {
     void* cuda_stream = cuda_config_ ? cuda_config_->stream : nullptr;
 
     // 计算辅助参数
-    // q_dim: Query 的总 Hidden Dim
     int32_t q_dim = head_num_ * head_size_;
-    // num_kv_heads: KV Heads 的数量
     int32_t num_kv_heads = kv_dim_ / head_size_;
 
     // ==========================================================================
     // Step 1: RoPE (Rotary Positional Embeddings)
     // ==========================================================================
-    // 作用：对当前的 Query 和 Key 进行位置编码旋转
-    // 注意：RoPE 是 In-place 操作，直接修改 Input Tensor (Q 和 K)
-
     kernel::RoPEKernel rope_kernel = kernel::get_rope_kernel(device_type_);
     if (!rope_kernel) {
         return base::Status(base::StatusCode::kFunctionUnImplement, "RoPE kernel missing");
@@ -96,45 +96,42 @@ base::Status PagedAttention::forward() {
                 cuda_stream);
 
     // ==========================================================================
-    // Step 2: KV Cache Write (Reshape and Cache)
+    // Prefill vs Decode 分支
     // ==========================================================================
-    // 作用：将旋转后的 Key 和 原始 Value 写入全局非连续的 KV Cache 中
-    // 依赖：PagedKVWriteKernel (之前已实现)
+    if (is_prefill_) {
+        // ---- Prefill: cuBLAS Batched GEMM + Causal Mask ----
+        // 一次性处理所有 prompt tokens，同时将 K/V 写入 Paged Cache
+        kernel::prefill_attention_kernel(
+            query, key, value, output, key_cache_, value_cache_, block_table, input_pos, head_num_,
+            num_kv_heads, head_size_, block_size_, cuda_config_ ? cuda_config_.get() : nullptr);
+    } else {
+        // ---- Decode: Paged Attention (单 token 查询) ----
 
-    kernel::PagedKVWriteKernel kv_write_kernel = kernel::get_paged_kv_write_kernel(device_type_);
-    if (!kv_write_kernel) {
-        return base::Status(base::StatusCode::kFunctionUnImplement, "PagedKVWrite kernel missing");
+        // Step 2: KV Cache Write
+        kernel::PagedKVWriteKernel kv_write_kernel =
+            kernel::get_paged_kv_write_kernel(device_type_);
+        if (!kv_write_kernel) {
+            return base::Status(base::StatusCode::kFunctionUnImplement,
+                                "PagedKVWrite kernel missing");
+        }
+        kv_write_kernel(key, value, key_cache_, value_cache_, block_table, input_pos, num_kv_heads,
+                        head_size_, block_size_, cuda_stream);
+
+        // Step 3: Paged Attention
+        kernel::PagedAttentionKernel pa_kernel = kernel::get_paged_attention_kernel(device_type_);
+        if (!pa_kernel) {
+            return base::Status(base::StatusCode::kFunctionUnImplement,
+                                "PagedAttention kernel missing");
+        }
+
+        float scale = 1.0f / std::sqrt(static_cast<float>(head_size_));
+        int32_t max_blocks_per_seq = static_cast<int32_t>(block_table.get_dim(1));
+        int32_t max_context_len_estimate = max_blocks_per_seq * block_size_;
+
+        pa_kernel(query, output, key_cache_, value_cache_, block_table, context_lens,
+                  max_context_len_estimate, head_num_, num_kv_heads, head_size_, block_size_, scale,
+                  cuda_stream);
     }
-
-    kv_write_kernel(key, value, key_cache_, value_cache_, block_table, input_pos, num_kv_heads,
-                    head_size_, block_size_, cuda_stream);
-
-    // ==========================================================================
-    // Step 3: Paged Attention (The Core)
-    // ==========================================================================
-    // 作用：利用 Block Table 和全局 Cache 计算 Attention Score 并聚合 Value
-
-    kernel::PagedAttentionKernel pa_kernel = kernel::get_paged_attention_kernel(device_type_);
-    if (!pa_kernel) {
-        return base::Status(base::StatusCode::kFunctionUnImplement,
-                            "PagedAttention kernel missing");
-    }
-
-    // 计算 Scale: 1 / sqrt(head_dim)
-    float scale = 1.0f / std::sqrt(static_cast<float>(head_size_));
-
-    // 计算 max_context_len
-    // PagedAttention Kernel 需要这个值来确定 Shared Memory 的大小。
-    // 由于 context_lens 在 GPU 上，我们不能直接读取最大值（会有同步开销）。
-    // 策略：使用 Block Table 的维度 [batch, max_blocks] 来估算物理上的最大可能长度。
-    // max_len <= max_blocks * block_size
-    int32_t max_blocks_per_seq = static_cast<int32_t>(block_table.get_dim(1));
-    int32_t max_context_len_estimate = max_blocks_per_seq * block_size_;
-
-    // 执行 Attention
-    pa_kernel(query, output, key_cache_, value_cache_, block_table, context_lens,
-              max_context_len_estimate, head_num_, num_kv_heads, head_size_, block_size_, scale,
-              cuda_stream);
 
     return base::error::Success();
 }

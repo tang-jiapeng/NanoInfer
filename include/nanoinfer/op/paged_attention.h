@@ -24,8 +24,8 @@ namespace op {
 class PagedAttention : public Layer {
    public:
     explicit PagedAttention(base::DeviceType device_type, int32_t layer_index, int32_t kv_mul,
-                                 int32_t kv_dim, int32_t head_num, int32_t head_size,
-                                 int32_t block_size);
+                            int32_t kv_dim, int32_t head_num, int32_t head_size,
+                            int32_t block_size);
 
     base::Status check() const override;
 
@@ -54,7 +54,15 @@ class PagedAttention : public Layer {
      */
     void set_rope_cache(const tensor::Tensor& sin_cache, const tensor::Tensor& cos_cache);
 
+    /**
+     * @brief 设置是否为 Prefill 模式
+     * Prefill 时使用 cuBLAS batched GEMM + causal mask 做全量注意力
+     * Decode 时使用 PagedAttention kernel 做单 token 注意力
+     */
+    void set_prefill(bool is_prefill);
+
    private:
+    bool is_prefill_ = false;
     int32_t layer_index_ = 0;
     int32_t kv_mul_ = 0;     // GQA: query_heads / kv_heads
     int32_t kv_dim_ = 0;     // num_kv_heads * head_size
