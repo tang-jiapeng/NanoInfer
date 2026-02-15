@@ -332,7 +332,138 @@ Temperature + Top-K + Top-P 基础版本：2-3 天。Repetition Penalty + 完整
 
 ---
 
-## 六、工程化改进
+## 六、CPU 推理优化
+
+### 6.1 当前基线
+
+CPU 推理已功能完整（Chunked Prefill + PagedAttention Decode + Continuous Batching），在 FP32 下对 TinyLLaMA-1.1B (22 layers, dim=2048) 的实测性能：
+
+- **Decode 吞吐**：~1.09 tok/s（2 并发请求）
+- **端到端吞吐**：~1.43 tok/s（含 Prefill）
+- **瓶颈分析**：MatMul 占 ~90%+ 时间（每层 4 次 [1×2048] × [2048×N] = 7 次/layer 含 QKV+O+FFN）
+
+### 6.2 矩阵乘法优化（最高优先级）
+
+当前 CPU MatMul 是朴素的三重循环（O(N³) 无优化）。这是性能瓶颈的根源。
+
+#### 6.2.1 OpenBLAS / MKL 集成
+
+**方案**：将 `matmul_kernel_cpu` 替换为 `cblas_sgemm` 调用。
+
+```cpp
+// 当前: 三重循环
+// 优化: cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+//                   M, N, K, 1.0f, A, K, B, K, 0.0f, C, N);
+```
+
+**预计收益**：10-50x 加速（OpenBLAS 利用 AVX-512/AVX2 + 分块 + 多线程）
+
+**实现步骤**：
+1. CMakeLists.txt 通过 `find_package(BLAS)` 查找系统 OpenBLAS
+2. `matmul_kernel_cpu` 中调用 `cblas_sgemm`
+3. 确保与现有权重布局（Row-Major / Column-Major）的 transpose 标记匹配
+
+#### 6.2.2 手写 SIMD Kernel（备选）
+
+如果不想依赖外部库：
+- AVX2: `_mm256_fmadd_ps` 做 8-wide FMA
+- 4×8 micro-kernel + cache-line 友好的分块（64×64 或 128×64）
+- 预计比朴素循环快 8-20x
+
+### 6.3 多线程并行
+
+#### 6.3.1 层内并行 (Intra-Layer)
+
+**Attention Heads 并行**：`prefill_attention_kernel_cpu` 和 `paged_attention_kernel_cpu` 中的 head 循环可以 `#pragma omp parallel for` 并行化（各 head 完全独立）。
+
+```cpp
+#pragma omp parallel for schedule(static)
+for (int32_t head = 0; head < num_heads; ++head) {
+    // 每个 head 的 Q@K^T → softmax → V 完全独立
+}
+```
+
+**MatMul 多线程**：如果使用 OpenBLAS，自带多线程；如果手写可用 OpenMP 按行分块并行。
+
+#### 6.3.2 Batch 并行
+
+Decode 阶段多个序列可以在不同线程上并行处理（各序列写不同的 KV Cache block，无冲突）。
+
+### 6.4 内存优化
+
+#### 6.4.1 权重量化 (INT8/INT4)
+
+**目标**：将 FP32 权重离线量化为 INT8，推理时用 INT8 MatMul + FP32 Accumulate。
+
+**收益**：
+- 模型体积 4.4GB → 1.1GB（INT8）或 550MB（INT4）
+- 内存带宽减少 4x，CPU 推理的 memory-bound 瓶颈显著缓解
+- 利用 AVX-VNNI（INT8 点积加速指令）
+
+**实现**：
+1. 导出工具增加 INT8 权重导出（Per-Channel 量化）
+2. 新增 `matmul_int8_kernel_cpu`：INT8 × INT8 → INT32 → FP32（反量化）
+3. 可用 `oneDNN` 库的 INT8 MatMul kernel
+
+#### 6.4.2 Memory Mapping (mmap)
+
+**目标**：使用 `mmap` 加载模型权重，避免 `read()` 的额外内存拷贝。
+
+**收益**：
+- 启动时间大幅缩短（不需要一次性读入全部权重到 malloc 内存）
+- OS 负责 page-in/page-out，多进程可共享同一份物理内存
+- 对小内存机器友好（lazy loading）
+
+**实现**：
+1. `raw_model_data.cpp` 中用 `mmap(fd, PROT_READ, MAP_PRIVATE)` 替换 `fread`
+2. 权重 Tensor 直接指向 mmap 区域，`allocate = false`
+
+### 6.5 Prefill 优化
+
+#### 6.5.1 分块 MatMul Prefill
+
+当前 Prefill 每个 query token 独立与全部 K 做 dot product。可以利用 BLAS 做批量 GEMM：
+
+```cpp
+// Query: [chunk_len, num_heads * head_size]
+// K_gathered: [context_len, num_kv_heads * head_size]
+// Scores = Q @ K^T → [chunk_len, context_len] (per head group)
+cblas_sgemm(..., chunk_len, context_len, head_size, ...);
+```
+
+这比逐 token 循环快得多（利用了 BLAS 的微架构优化）。
+
+#### 6.5.2 Causal Mask 优化
+
+当前 Prefill CPU kernel 对每个 query token 的 valid_len 不同（causal），导致循环边界不规则。可以用 Masked GEMM（全量计算 + mask 后 softmax）减少分支。
+
+### 6.6 算子融合 (Operator Fusion)
+
+#### 6.6.1 RMSNorm + Linear 融合
+
+将 RMSNorm 归一化后直接进入下一步的 MatMul，避免中间 tensor 的内存写回 + 读取。
+
+#### 6.6.2 SwiGLU 融合
+
+当前 SwiGLU 分 3 步（gate_proj, up_proj, silu + mul）。可融合为一个 kernel，减少内存访问。
+
+### 6.7 CPU 推理优先级与时间线
+
+| 优先级 | 任务 | 预计收益 | 预计工作量 |
+|--------|------|---------|-----------|
+| **P0 (最高)** | 集成 OpenBLAS for MatMul | 10-50x MatMul 加速 | 0.5-1 天 |
+| **P0** | Attention heads OpenMP 并行 | 线性加速（按核心数） | 0.5 天 |
+| **P1** | Prefill 用 cblas_sgemm 做批量 attention | 5-10x prefill 加速 | 1 天 |
+| **P1** | 权重 INT8 量化 | 4x 内存带宽节省 | 2-3 天 |
+| **P2** | Memory Mapping (mmap) 加载权重 | 启动速度提升 | 0.5 天 |
+| **P2** | SwiGLU / RMSNorm 算子融合 | 10-20% 整体加速 | 1-2 天 |
+| **P3** | 手写 AVX2 micro-kernel | 无外部依赖的高性能 MatMul | 3-5 天 |
+
+**最优投入顺序**：先集成 OpenBLAS（投入产出比最高），再加 OpenMP 多线程，预计可实现 **20-100x** 整体推理加速（从 1 tok/s → 20-100 tok/s）。
+
+---
+
+## 七、工程化改进
 
 ### 6.1 错误处理与 CUDA 错误检查
 
@@ -371,14 +502,21 @@ Temperature + Top-K + Top-P 基础版本：2-3 天。Repetition Penalty + 完整
 
 | 优先级 | 任务 | 预计工作量 | 依赖 |
 |--------|------|-----------|------|
+| P0 (高) | **CPU: 集成 OpenBLAS MatMul** | 0.5-1 天 | 无 |
+| P0 (高) | **CPU: Attention heads OpenMP 并行** | 0.5 天 | 无 |
 | P0 (高) | 预分配 workspace 替代 cudaMallocAsync | 1 天 | 无 |
 | P0 (高) | CUDA 错误检查宏 | 0.5 天 | 无 |
+| P1 (中) | **CPU: Prefill cblas_sgemm 批量 attention** | 1 天 | OpenBLAS |
+| P1 (中) | **CPU: 权重 INT8 量化** | 2-3 天 | 无 |
 | P1 (中) | 采样策略 (Temperature + Top-P) | 2-3 天 | 无 |
 | P1 (中) | 非最后 chunk 跳过 LM Head | 1 天 | 无 |
 | P1 (中) | FP16 推理 | 3-5 天 | 无 |
+| P2 | **CPU: mmap 权重加载** | 0.5 天 | 无 |
+| P2 | **CPU: 算子融合 (SwiGLU/RMSNorm)** | 1-2 天 | 无 |
 | P2 | Qwen 模型支持 | 3-5 天 | FP16 (可选) |
 | P2 | Priority 调度 | 1-2 天 | 无 |
 | P2 | Chunked Prefill 单元测试 | 1 天 | 无 |
+| P3 (低) | **CPU: 手写 AVX2 micro-kernel** | 3-5 天 | 无 |
 | P3 (低) | FlashAttention 集成 | 5-7 天 | FP16 |
 | P3 (低) | CUDA Graph | 3-5 天 | 无 |
 | P3 (低) | Speculative Decoding | 5-7 天 | 多模型加载 |
