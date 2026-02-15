@@ -145,6 +145,7 @@ class Engine {
     std::unique_ptr<sampler::Sampler> sampler_;
 
     std::shared_ptr<base::DeviceAllocator> allocator_;
+    base::DeviceType device_type_ = base::DeviceType::kDeviceUnknown;
 
     bool initialized_ = false;
     std::atomic<bool> running_{false};

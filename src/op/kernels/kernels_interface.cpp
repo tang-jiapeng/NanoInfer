@@ -4,6 +4,8 @@
 #include "cpu/embedding_kernel.h"
 #include "cpu/matmul_kernel.h"
 #include "cpu/mha_kernel.h"
+#include "cpu/paged_attention_kernel.h"
+#include "cpu/paged_kv_write_kernel.h"
 #include "cpu/rmsnorm_kernel.h"
 #include "cpu/rope_kernel.h"
 #include "cpu/scale_kernel.h"
@@ -133,7 +135,9 @@ ScaleSumKernel get_scale_sum_kernel(base::DeviceType device_type) {
 }
 
 PagedAttentionKernel get_paged_attention_kernel(base::DeviceType device_type) {
-    if (device_type == base::DeviceType::kDeviceCUDA) {
+    if (device_type == base::DeviceType::kDeviceCPU) {
+        return paged_attention_kernel_cpu;
+    } else if (device_type == base::DeviceType::kDeviceCUDA) {
         return paged_attention_kernel;
     } else {
         LOG(FATAL) << "Unknown device type for get a paged attention kernel.";
@@ -142,7 +146,9 @@ PagedAttentionKernel get_paged_attention_kernel(base::DeviceType device_type) {
 }
 
 PagedKVWriteKernel get_paged_kv_write_kernel(base::DeviceType device_type) {
-    if (device_type == base::DeviceType::kDeviceCUDA) {
+    if (device_type == base::DeviceType::kDeviceCPU) {
+        return paged_kv_write_kernel_cpu;
+    } else if (device_type == base::DeviceType::kDeviceCUDA) {
         return paged_kv_write_kernel;
     } else {
         LOG(FATAL) << "Unknown device type for get a paged kv write kernel.";

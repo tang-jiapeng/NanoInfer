@@ -1,4 +1,5 @@
 #include "nanoinfer/op/paged_attention.h"
+#include "kernels/cpu/prefill_attention_kernel.h"
 #include "kernels/cuda/prefill_attention_kernel.cuh"
 #include "kernels/kernels_interface.h"
 
@@ -39,10 +40,7 @@ base::Status PagedAttention::check() const {
 }
 
 base::Status PagedAttention::init() {
-    if (device_type_ != base::DeviceType::kDeviceCUDA) {
-        return base::Status(base::StatusCode::kFunctionUnImplement,
-                            "PagedAttention only supports CUDA currently.");
-    }
+    // CPU 和 CUDA 均已支持
     return base::error::Success();
 }
 
@@ -103,12 +101,18 @@ base::Status PagedAttention::forward() {
     // Prefill vs Decode 分支
     // ==========================================================================
     if (is_prefill_) {
-        // ---- Chunked Prefill: Write to cache + Gather + cuBLAS ----
-        // Score 矩阵: [num_heads, chunk_len, context_len] — 不再是 O(seq_len²)
-        kernel::prefill_attention_kernel(query, key, value, output, key_cache_, value_cache_,
-                                         block_table, input_pos, head_num_, num_kv_heads,
-                                         head_size_, block_size_, context_len_,
-                                         cuda_config_ ? cuda_config_.get() : nullptr);
+        if (device_type_ == base::DeviceType::kDeviceCUDA) {
+            // ---- CUDA: Chunked Prefill via cuBLAS + Gather ----
+            kernel::prefill_attention_kernel(query, key, value, output, key_cache_, value_cache_,
+                                             block_table, input_pos, head_num_, num_kv_heads,
+                                             head_size_, block_size_, context_len_,
+                                             cuda_config_ ? cuda_config_.get() : nullptr);
+        } else {
+            // ---- CPU: Chunked Prefill via loops ----
+            kernel::prefill_attention_kernel_cpu(
+                query, key, value, output, key_cache_, value_cache_, block_table, input_pos,
+                head_num_, num_kv_heads, head_size_, block_size_, context_len_);
+        }
     } else {
         // ---- Decode: Paged Attention (单 token 查询) ----
 

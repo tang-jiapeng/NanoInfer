@@ -1,4 +1,5 @@
 #include "nanoinfer/engine/engine.h"
+#include <cstring>
 
 namespace engine {
 
@@ -21,6 +22,7 @@ base::Status Engine::init(std::shared_ptr<base::DeviceAllocator> allocator) {
     }
 
     allocator_ = allocator;
+    device_type_ = allocator->device_type();
 
     VLOG(1) << "Initializing Engine with Max Batch=" << config_.max_batch_size
             << ", Max Seqs=" << config_.max_sequences;
@@ -203,9 +205,14 @@ base::Status Engine::execute_prefill_single(const InferenceRequestPtr& req,
     auto status = kv_cache_manager_->get_block_table_tensor({request_id}, block_table_cpu);
     if (!status) return status;
 
-    cudaMemcpyAsync(block_table_device_.ptr<void>(), block_table_cpu.ptr<void>(),
-                    block_table_cpu.byte_size(), cudaMemcpyHostToDevice);
-    fwd_batch.block_table = block_table_device_;
+    if (device_type_ == base::DeviceType::kDeviceCUDA) {
+        cudaMemcpyAsync(block_table_device_.ptr<void>(), block_table_cpu.ptr<void>(),
+                        block_table_cpu.byte_size(), cudaMemcpyHostToDevice);
+        fwd_batch.block_table = block_table_device_;
+    } else {
+        // CPU: block_table 已在 host 端，直接使用
+        fwd_batch.block_table = block_table_cpu;
+    }
 
     // Forward (输出 [chunk_len, vocab_size])
     int32_t vocab_size = model_->config().vocab_size_;
@@ -221,15 +228,25 @@ base::Status Engine::execute_prefill_single(const InferenceRequestPtr& req,
         // 取最后一个 token 的 logits 做 argmax 采样
         tensor::Tensor last_logits(base::DataType::kDataTypeFp32, 1, vocab_size, true, allocator_);
         int64_t last_offset = static_cast<int64_t>(chunk_len - 1) * vocab_size;
-        cudaMemcpyAsync(last_logits.ptr<float>(), logits.ptr<float>() + last_offset,
-                        vocab_size * sizeof(float), cudaMemcpyDeviceToDevice);
+        if (device_type_ == base::DeviceType::kDeviceCUDA) {
+            cudaMemcpyAsync(last_logits.ptr<float>(), logits.ptr<float>() + last_offset,
+                            vocab_size * sizeof(float), cudaMemcpyDeviceToDevice);
+        } else {
+            std::memcpy(last_logits.ptr<float>(), logits.ptr<float>() + last_offset,
+                        vocab_size * sizeof(float));
+        }
 
         tensor::Tensor sampled_id(base::DataType::kDataTypeInt32, 1, true, allocator_);
         sampler_->sample_batched(last_logits, sampled_id);
 
         // D2H
         int32_t next_token;
-        cudaMemcpy(&next_token, sampled_id.ptr<void>(), sizeof(int32_t), cudaMemcpyDeviceToHost);
+        if (device_type_ == base::DeviceType::kDeviceCUDA) {
+            cudaMemcpy(&next_token, sampled_id.ptr<void>(), sizeof(int32_t),
+                       cudaMemcpyDeviceToHost);
+        } else {
+            std::memcpy(&next_token, sampled_id.ptr<void>(), sizeof(int32_t));
+        }
 
         int32_t eos_id = model_->config().eos_token_id_;
         bool continue_gen = req->add_token(next_token, eos_id);
@@ -285,9 +302,13 @@ base::Status Engine::execute_decode_batch(const std::vector<InferenceRequestPtr>
     auto status = kv_cache_manager_->get_block_table_tensor(request_ids_vec, block_table_cpu);
     if (!status) return status;
 
-    cudaMemcpyAsync(block_table_device_.ptr<void>(), block_table_cpu.ptr<void>(),
-                    block_table_cpu.byte_size(), cudaMemcpyHostToDevice);
-    fwd_batch.block_table = block_table_device_;
+    if (device_type_ == base::DeviceType::kDeviceCUDA) {
+        cudaMemcpyAsync(block_table_device_.ptr<void>(), block_table_cpu.ptr<void>(),
+                        block_table_cpu.byte_size(), cudaMemcpyHostToDevice);
+        fwd_batch.block_table = block_table_device_;
+    } else {
+        fwd_batch.block_table = block_table_cpu;
+    }
 
     // Forward (输出 [batch_size, vocab_size], 因为 decode 每请求 1 token)
     tensor::Tensor logits(base::DataType::kDataTypeFp32, batch_size, vocab_size, true, allocator_);
@@ -300,8 +321,12 @@ base::Status Engine::execute_decode_batch(const std::vector<InferenceRequestPtr>
 
     // D2H
     std::vector<int32_t> next_tokens(batch_size);
-    cudaMemcpy(next_tokens.data(), sampled_ids_dev.ptr<void>(), batch_size * sizeof(int32_t),
-               cudaMemcpyDeviceToHost);
+    if (device_type_ == base::DeviceType::kDeviceCUDA) {
+        cudaMemcpy(next_tokens.data(), sampled_ids_dev.ptr<void>(), batch_size * sizeof(int32_t),
+                   cudaMemcpyDeviceToHost);
+    } else {
+        std::memcpy(next_tokens.data(), sampled_ids_dev.ptr<void>(), batch_size * sizeof(int32_t));
+    }
 
     // 更新 Request 状态
     int32_t eos_id = model_->config().eos_token_id_;
