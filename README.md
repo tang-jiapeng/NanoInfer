@@ -22,7 +22,11 @@ NanoInfer is a minimal yet functional inference framework designed to explore an
   - Block Manager with dynamic allocation/deallocation
   - Block Table mapping logical → physical blocks
   - Per-layer paged Key/Value caches
-- **Parallel Prefill** — processes all prompt tokens in a single forward pass using cuBLAS batched GEMM with causal masking, instead of token-by-token iteration
+- **Chunked Prefill** — vLLM-style chunked prefill that processes prompt tokens in fixed-size chunks (default 512) rather than all at once
+  - Score matrix bounded to O(chunk_len × context_len) instead of O(seq_len²), preventing OOM on long prompts
+  - Gathers all cached K/V from Paged Cache per chunk for cuBLAS GEMM, combining memory efficiency with compute throughput
+  - Non-last chunks skip sampling; only the final chunk triggers first-token generation
+  - Transparent to upper-layer API — short prompts (< chunk_size) behave identically to single-pass prefill
 - **Scheduler** — FCFS policy with configurable max batch size, max concurrent sequences, and prefill chunk size
 
 ### CUDA Kernels
@@ -35,8 +39,9 @@ NanoInfer is a minimal yet functional inference framework designed to explore an
 | RoPE | Rotary Positional Embedding (precomputed sin/cos cache) |
 | SwiGLU | SwiGLU activation for FFN |
 | PagedAttention | Decode-phase attention with paged KV cache |
-| Prefill Attention | cuBLAS batched GEMM + causal softmax for prefill phase |
+| Chunked Prefill Attention | Gather K/V from paged cache → cuBLAS GEMM → chunked causal softmax |
 | Paged KV Write | Write K/V into block-based cache |
+| KV Cache Gather | Collect scattered paged K/V into contiguous buffer for GEMM |
 | Add | Residual connection (element-wise add) |
 | Argmax | Batched argmax sampling |
 
