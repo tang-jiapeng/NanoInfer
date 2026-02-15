@@ -2,8 +2,7 @@
 
 namespace engine {
 InferenceRequest::InferenceRequest(int64_t request_id, std::string prompt,
-                                   std::vector<int32_t> prompt_tokens,
-                                   int32_t max_new_tokens)
+                                   std::vector<int32_t> prompt_tokens, int32_t max_new_tokens)
     : request_id_(request_id),
       prompt_(std::move(prompt)),
       prompt_tokens_(std::move(prompt_tokens)),
@@ -40,7 +39,6 @@ void InferenceRequest::resume() {
 
 bool InferenceRequest::add_token(int32_t token, int32_t eos_token_id) {
     generated_tokens_.push_back(token);
-    num_computed_tokens_++;
 
     // 检查停止条件:
     // 生成了结束符 (EOS)
@@ -96,8 +94,7 @@ std::vector<int32_t> InferenceRequest::get_next_chunk_tokens(int32_t chunk_size)
     return tokens;
 }
 
-std::vector<int32_t> InferenceRequest::get_next_chunk_positions(
-    int32_t chunk_size) const {
+std::vector<int32_t> InferenceRequest::get_next_chunk_positions(int32_t chunk_size) const {
     std::vector<int32_t> positions;
 
     int32_t count = 0;

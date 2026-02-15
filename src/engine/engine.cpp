@@ -332,6 +332,7 @@ base::Status Engine::execute_decode_batch(const std::vector<InferenceRequestPtr>
     int32_t eos_id = model_->config().eos_token_id_;
     for (int i = 0; i < batch_size; ++i) {
         auto& req = reqs[i];
+        req->add_computed_tokens(1);  // decode forward 已将本 token 的 K/V 写入 cache
         bool continue_gen = req->add_token(next_tokens[i], eos_id);
         if (!continue_gen) {
             finished_ids.push_back(req->request_id());
