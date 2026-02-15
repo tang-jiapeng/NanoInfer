@@ -56,13 +56,20 @@ class PagedAttention : public Layer {
 
     /**
      * @brief 设置是否为 Prefill 模式
-     * Prefill 时使用 cuBLAS batched GEMM + causal mask 做全量注意力
+     * Prefill 时使用 Chunked Prefill (cuBLAS + Gather from cache)
      * Decode 时使用 PagedAttention kernel 做单 token 注意力
      */
     void set_prefill(bool is_prefill);
 
+    /**
+     * @brief 设置当前 chunk 完成后的总上下文长度 (host side)
+     * 仅 Prefill 模式使用, = start_pos + chunk_len
+     */
+    void set_context_len(int32_t context_len);
+
    private:
     bool is_prefill_ = false;
+    int32_t context_len_ = 0;
     int32_t layer_index_ = 0;
     int32_t kv_mul_ = 0;     // GQA: query_heads / kv_heads
     int32_t kv_dim_ = 0;     // num_kv_heads * head_size

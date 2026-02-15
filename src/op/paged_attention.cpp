@@ -63,6 +63,10 @@ void PagedAttention::set_prefill(bool is_prefill) {
     is_prefill_ = is_prefill;
 }
 
+void PagedAttention::set_context_len(int32_t context_len) {
+    context_len_ = context_len;
+}
+
 base::Status PagedAttention::forward() {
     auto status = check();
     if (!status) return status;
@@ -99,11 +103,12 @@ base::Status PagedAttention::forward() {
     // Prefill vs Decode 分支
     // ==========================================================================
     if (is_prefill_) {
-        // ---- Prefill: cuBLAS Batched GEMM + Causal Mask ----
-        // 一次性处理所有 prompt tokens，同时将 K/V 写入 Paged Cache
-        kernel::prefill_attention_kernel(
-            query, key, value, output, key_cache_, value_cache_, block_table, input_pos, head_num_,
-            num_kv_heads, head_size_, block_size_, cuda_config_ ? cuda_config_.get() : nullptr);
+        // ---- Chunked Prefill: Write to cache + Gather + cuBLAS ----
+        // Score 矩阵: [num_heads, chunk_len, context_len] — 不再是 O(seq_len²)
+        kernel::prefill_attention_kernel(query, key, value, output, key_cache_, value_cache_,
+                                         block_table, input_pos, head_num_, num_kv_heads,
+                                         head_size_, block_size_, context_len_,
+                                         cuda_config_ ? cuda_config_.get() : nullptr);
     } else {
         // ---- Decode: Paged Attention (单 token 查询) ----
 

@@ -135,8 +135,8 @@ base::Status Engine::execute_batch(const ScheduledBatch& batch) {
     // ======================================================================
     // 拆分: Prefill 请求 vs Decode 请求
     // ======================================================================
-    // Prefill: 使用并行 cuBLAS 路径, 每个请求独立处理 (所有 prompt tokens 一次性)
-    // Decode:  使用 PagedAttention kernel, 所有请求合并为一个 batch
+    // Prefill: Chunked Prefill (cuBLAS), 每个请求独立处理 (每步最多 chunk_size tokens)
+    // Decode:  PagedAttention kernel, 所有请求合并为一个 batch
     std::vector<InferenceRequestPtr> prefill_reqs;
     std::vector<InferenceRequestPtr> decode_reqs;
 
@@ -150,7 +150,7 @@ base::Status Engine::execute_batch(const ScheduledBatch& batch) {
 
     std::vector<int64_t> finished_ids;
 
-    // Phase 1: 并行 Prefill (逐请求, 但每个请求内部并行处理所有 tokens)
+    // Phase 1: Chunked Prefill (逐请求, 每步最多处理 chunk_size 个 tokens)
     for (const auto& req : prefill_reqs) {
         auto status = execute_prefill_single(req, finished_ids);
         if (!status) return status;
@@ -172,28 +172,35 @@ base::Status Engine::execute_prefill_single(const InferenceRequestPtr& req,
                                             std::vector<int64_t>& finished_ids) {
     int32_t request_id = static_cast<int32_t>(req->request_id());
 
-    // 获取所有剩余的 Prompt tokens (一次性处理)
+    // ========  Chunked Prefill (vLLM 风格)  ========
+    // 每次调用只处理一个 chunk（最多 prefill_chunk_size 个 tokens）
+    // Engine::step() 每轮调度 → 未完成的 prefill 请求会在下一轮继续
+    // 最后一个 chunk 处理完后再采样第一个 generated token
     int32_t remaining = req->prefill_remaining();
-    std::vector<int32_t> tokens = req->get_next_chunk_tokens(remaining);
-    std::vector<int32_t> positions = req->get_next_chunk_positions(remaining);
-    int32_t chunk_len = static_cast<int32_t>(tokens.size());
+    int32_t chunk_len = std::min(remaining, config_.prefill_chunk_size);
+    std::vector<int32_t> tokens = req->get_next_chunk_tokens(chunk_len);
+    std::vector<int32_t> positions = req->get_next_chunk_positions(chunk_len);
+    chunk_len = static_cast<int32_t>(tokens.size());  // 以实际返回为准
 
-    // 动态扩展 KV Cache
-    auto status = kv_cache_manager_->extend_sequence(request_id, chunk_len);
-    if (!status) return status;
+    // 注意: allocate_sequence 已在 add_request 中为整个 prompt 分配了足够的 blocks
+    //       此处 **不需要** extend_sequence (那会导致多余的 block 分配)
 
     // 构建 ForwardBatch (单序列, prefill 模式)
+    // context_len = 已完成 tokens + 本 chunk tokens = 本 chunk 结束后的总上下文长度
+    int32_t computed = req->num_computed_tokens();
+    int32_t context_len = computed + chunk_len;
+
     model::ForwardBatch fwd_batch;
     fwd_batch.batch_size = 1;
     fwd_batch.is_prefill = true;
     fwd_batch.token_ids = std::move(tokens);
     fwd_batch.positions = std::move(positions);
-    fwd_batch.context_lens = {req->num_computed_tokens() + chunk_len};
-    fwd_batch.max_context_len = fwd_batch.context_lens[0];
+    fwd_batch.context_lens = {context_len};
+    fwd_batch.max_context_len = context_len;
 
     // Block Table
     tensor::Tensor block_table_cpu;
-    status = kv_cache_manager_->get_block_table_tensor({request_id}, block_table_cpu);
+    auto status = kv_cache_manager_->get_block_table_tensor({request_id}, block_table_cpu);
     if (!status) return status;
 
     cudaMemcpyAsync(block_table_device_.ptr<void>(), block_table_cpu.ptr<void>(),
@@ -206,28 +213,32 @@ base::Status Engine::execute_prefill_single(const InferenceRequestPtr& req,
     status = model_->forward_batched(fwd_batch, logits);
     if (!status) return status;
 
-    // 只对最后一个 token 进行采样
-    tensor::Tensor last_logits(base::DataType::kDataTypeFp32, 1, vocab_size, true, allocator_);
-    int64_t last_offset = static_cast<int64_t>(chunk_len - 1) * vocab_size;
-    cudaMemcpyAsync(last_logits.ptr<float>(), logits.ptr<float>() + last_offset,
-                    vocab_size * sizeof(float), cudaMemcpyDeviceToDevice);
-
-    tensor::Tensor sampled_id(base::DataType::kDataTypeInt32, 1, true, allocator_);
-    sampler_->sample_batched(last_logits, sampled_id);
-
-    // D2H
-    int32_t next_token;
-    cudaMemcpy(&next_token, sampled_id.ptr<void>(), sizeof(int32_t), cudaMemcpyDeviceToHost);
-
-    // 更新 Request 状态: prefill 完成 + 添加第一个生成 token
+    // 更新已计算 token 数
     req->add_computed_tokens(chunk_len);
 
-    int32_t eos_id = model_->config().eos_token_id_;
-    bool continue_gen = req->add_token(next_token, eos_id);
-    if (!continue_gen) {
-        finished_ids.push_back(req->request_id());
-        kv_cache_manager_->free_sequence(request_id);
+    // ==== 仅当 prefill 全部完成后才采样 ====
+    if (req->prefill_remaining() == 0) {
+        // 取最后一个 token 的 logits 做 argmax 采样
+        tensor::Tensor last_logits(base::DataType::kDataTypeFp32, 1, vocab_size, true, allocator_);
+        int64_t last_offset = static_cast<int64_t>(chunk_len - 1) * vocab_size;
+        cudaMemcpyAsync(last_logits.ptr<float>(), logits.ptr<float>() + last_offset,
+                        vocab_size * sizeof(float), cudaMemcpyDeviceToDevice);
+
+        tensor::Tensor sampled_id(base::DataType::kDataTypeInt32, 1, true, allocator_);
+        sampler_->sample_batched(last_logits, sampled_id);
+
+        // D2H
+        int32_t next_token;
+        cudaMemcpy(&next_token, sampled_id.ptr<void>(), sizeof(int32_t), cudaMemcpyDeviceToHost);
+
+        int32_t eos_id = model_->config().eos_token_id_;
+        bool continue_gen = req->add_token(next_token, eos_id);
+        if (!continue_gen) {
+            finished_ids.push_back(req->request_id());
+            kv_cache_manager_->free_sequence(request_id);
+        }
     }
+    // 否则: 非最后一轮 chunk, 不采样, 下一轮 step() 会继续处理该请求
 
     return base::error::Success();
 }

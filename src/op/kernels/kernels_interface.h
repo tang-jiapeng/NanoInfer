@@ -10,7 +10,7 @@ void prefill_attention_kernel(const tensor::Tensor& query, const tensor::Tensor&
                               const tensor::Tensor& k_cache, const tensor::Tensor& v_cache,
                               const tensor::Tensor& block_table, const tensor::Tensor& positions,
                               int32_t num_heads, int32_t num_kv_heads, int32_t head_size,
-                              int32_t block_size, const CudaConfig* config);
+                              int32_t block_size, int32_t context_len, const CudaConfig* config);
 }  // namespace kernel
 
 namespace kernel {

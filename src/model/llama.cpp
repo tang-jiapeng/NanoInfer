@@ -278,6 +278,9 @@ base::Status LLamaModel::forward_batched(const ForwardBatch& input, tensor::Tens
         auto& pa_layer = llama_layers_->paged_attn_layer_;
         // 设置 Prefill / Decode 模式
         pa_layer->set_prefill(input.is_prefill);
+        if (input.is_prefill && !input.context_lens.empty()) {
+            pa_layer->set_context_len(input.context_lens[0]);
+        }
         // 设置 Input
         pa_layer->set_input(0, q);
         pa_layer->set_input(1, k);
