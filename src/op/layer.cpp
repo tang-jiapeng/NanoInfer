@@ -233,129 +233,138 @@ const tensor::Tensor& LayerParam::get_weight(int32_t idx) const {
 
 /** @brief 将所有输入/输出/权重/缩放因子迁移到 CUDA */
 void LayerParam::to_cuda() {
-    /**
-     * @brief 从原始指针构建权重 Tensor 并设置到 weights_ 槽位
-     *
-     * FP32 模式：直接包装为 float Tensor（external 模式，不拷贝数据）。
-     * Int8 量化模式：包装为 int8 Tensor，同时解析紧跟权重后的 Scale 数据
-     *   （按 group_size 分组，scale_nums = weight_size / group_size）。
-     */
-    base::Status LayerParam::set_weight(int32_t idx, const std::vector<int32_t>& dims,
-                                        const void* weight_ptr, base::DeviceType device_type) {
-        CHECK_GE(idx, 0);
-        CHECK_LT(idx, weights_.size());
-        CHECK_NE(weight_ptr, nullptr);
+    Layer::to_cuda();
+    for (auto& weight : weights_) {
+        weight.to_cuda(cuda_config_ ? cuda_config_->stream : nullptr);
+    }
+    if (!scales_.is_empty()) {
+        scales_.to_cuda(cuda_config_ ? cuda_config_->stream : nullptr);
+    }
+}
 
-        size_t size = std::accumulate(dims.begin(), dims.end(), sizeof(float), std::multiplies<>());
-        std::shared_ptr<base::Buffer> buffer =
-            std::make_shared<base::Buffer>(size, nullptr, const_cast<void*>(weight_ptr), true);
-        if (device_type != base::DeviceType::kDeviceUnknown) {
-            buffer->set_device_type(device_type);
-        }
+/**
+ * @brief 从原始指针构建权重 Tensor 并设置到 weights_ 槽位
+ *
+ * FP32 模式：直接包装为 float Tensor（external 模式，不拷贝数据）。
+ * Int8 量化模式：包装为 int8 Tensor，同时解析紧跟权重后的 Scale 数据
+ *   （按 group_size 分组，scale_nums = weight_size / group_size）。
+ */
+base::Status LayerParam::set_weight(int32_t idx, const std::vector<int32_t>& dims,
+                                    const void* weight_ptr, base::DeviceType device_type) {
+    CHECK_GE(idx, 0);
+    CHECK_LT(idx, weights_.size());
+    CHECK_NE(weight_ptr, nullptr);
 
-        if (!is_quant_layer_) {
-            tensor::Tensor weight(base::DataType::kDataTypeFp32, dims);
-            weight.set_device_type(device_type);
-            CHECK(weight.assign(buffer));
-            weights_.at(idx) = weight;
-        } else {
-            // is quant layer
-            tensor::Tensor weight(base::DataType::kDataTypeInt8, dims);
-            weight.set_device_type(device_type);
-            CHECK(weight.assign(buffer));
-            weights_.at(idx) = weight;
-
-            const int32_t weight_size = static_cast<int32_t>(weight.size());
-            CHECK(weight_size % group_size_ == 0);
-
-            int32_t scale_nums = weight_size / group_size_;
-            scales_ = tensor::Tensor{base::DataType::kDataTypeFp32, scale_nums, false, nullptr,
-                                     reinterpret_cast<float*>((int8_t*)weight_ptr + weight_size)};
-            scales_.set_device_type(device_type);
-        }
-
-        return base::error::Success();
+    size_t size = std::accumulate(dims.begin(), dims.end(), sizeof(float), std::multiplies<>());
+    std::shared_ptr<base::Buffer> buffer =
+        std::make_shared<base::Buffer>(size, nullptr, const_cast<void*>(weight_ptr), true);
+    if (device_type != base::DeviceType::kDeviceUnknown) {
+        buffer->set_device_type(device_type);
     }
 
-    void LayerParam::set_scales(const tensor::Tensor& scales) {
-        CHECK(!scales.is_empty());
-        this->scales_ = scales;
+    if (!is_quant_layer_) {
+        tensor::Tensor weight(base::DataType::kDataTypeFp32, dims);
+        weight.set_device_type(device_type);
+        CHECK(weight.assign(buffer));
+        weights_.at(idx) = weight;
+    } else {
+        // is quant layer
+        tensor::Tensor weight(base::DataType::kDataTypeInt8, dims);
+        weight.set_device_type(device_type);
+        CHECK(weight.assign(buffer));
+        weights_.at(idx) = weight;
+
+        const int32_t weight_size = static_cast<int32_t>(weight.size());
+        CHECK(weight_size % group_size_ == 0);
+
+        int32_t scale_nums = weight_size / group_size_;
+        scales_ = tensor::Tensor{base::DataType::kDataTypeFp32, scale_nums, false, nullptr,
+                                 reinterpret_cast<float*>((int8_t*)weight_ptr + weight_size)};
+        scales_.set_device_type(device_type);
     }
 
-    void LayerParam::set_group_size(int32_t group_size) {
-        this->group_size_ = group_size;
-    }
+    return base::error::Success();
+}
 
-    int32_t LayerParam::get_scale_num() const {
-        CHECK(!scales_.is_empty());
-        return static_cast<int32_t>(scales_.size());
-    }
+void LayerParam::set_scales(const tensor::Tensor& scales) {
+    CHECK(!scales.is_empty());
+    this->scales_ = scales;
+}
 
-    void LayerParam::reset_weight_size(size_t size) {
-        weights_.resize(size);
-    }
+void LayerParam::set_group_size(int32_t group_size) {
+    this->group_size_ = group_size;
+}
 
-    size_t LayerParam::weight_size() const {
-        return weights_.size();
-    }
+int32_t LayerParam::get_scale_num() const {
+    CHECK(!scales_.is_empty());
+    return static_cast<int32_t>(scales_.size());
+}
 
-    // -----------------------------------------------------------------------
-    // Layer::forward 多参数重载：便捷接口，自动 set_input/set_output 后调用 forward()
-    // -----------------------------------------------------------------------
-    base::Status Layer::forward(const tensor::Tensor& input1, const tensor::Tensor& output1) {
-        this->set_input(0, input1);
-        this->set_output(0, output1);
-        return this->forward();
-    }
+void LayerParam::reset_weight_size(size_t size) {
+    weights_.resize(size);
+}
 
-    base::Status Layer::forward(const tensor::Tensor& input1, const tensor::Tensor& input2,
-                                const tensor::Tensor& output1) {
-        this->set_input(0, input1);
-        this->set_input(1, input2);
+size_t LayerParam::weight_size() const {
+    return weights_.size();
+}
 
-        this->set_output(0, output1);
-        return this->forward();
-    }
+// -----------------------------------------------------------------------
+// Layer::forward 多参数重载：便捷接口，自动 set_input/set_output 后调用 forward()
+// -----------------------------------------------------------------------
+base::Status Layer::forward(const tensor::Tensor& input1, const tensor::Tensor& output1) {
+    this->set_input(0, input1);
+    this->set_output(0, output1);
+    return this->forward();
+}
 
-    base::Status Layer::forward(const tensor::Tensor& input1, const tensor::Tensor& input2,
-                                const tensor::Tensor& input3, const tensor::Tensor& output1) {
-        this->set_input(0, input1);
-        this->set_input(1, input2);
-        this->set_input(2, input3);
+base::Status Layer::forward(const tensor::Tensor& input1, const tensor::Tensor& input2,
+                            const tensor::Tensor& output1) {
+    this->set_input(0, input1);
+    this->set_input(1, input2);
 
-        this->set_output(0, output1);
-        return this->forward();
-    }
+    this->set_output(0, output1);
+    return this->forward();
+}
 
-    base::Status Layer::forward(const tensor::Tensor& input1, const tensor::Tensor& input2,
-                                const tensor::Tensor& input3, const tensor::Tensor& input4,
-                                const tensor::Tensor& output1) {
-        this->set_input(0, input1);
-        this->set_input(1, input2);
-        this->set_input(2, input3);
-        this->set_input(3, input4);
+base::Status Layer::forward(const tensor::Tensor& input1, const tensor::Tensor& input2,
+                            const tensor::Tensor& input3, const tensor::Tensor& output1) {
+    this->set_input(0, input1);
+    this->set_input(1, input2);
+    this->set_input(2, input3);
 
-        this->set_output(0, output1);
-        return this->forward();
-    }
+    this->set_output(0, output1);
+    return this->forward();
+}
 
-    base::Status Layer::forward(const tensor::Tensor& input1, const tensor::Tensor& input2,
-                                const tensor::Tensor& input3, const tensor::Tensor& input4,
-                                const tensor::Tensor& input5, const tensor::Tensor& output1) {
-        this->set_input(0, input1);
-        this->set_input(1, input2);
-        this->set_input(2, input3);
-        this->set_input(3, input4);
-        this->set_input(4, input5);
+base::Status Layer::forward(const tensor::Tensor& input1, const tensor::Tensor& input2,
+                            const tensor::Tensor& input3, const tensor::Tensor& input4,
+                            const tensor::Tensor& output1) {
+    this->set_input(0, input1);
+    this->set_input(1, input2);
+    this->set_input(2, input3);
+    this->set_input(3, input4);
 
-        this->set_output(0, output1);
-        return this->forward();
-    }
+    this->set_output(0, output1);
+    return this->forward();
+}
 
-    tensor::Tensor& LayerParam::get_weight(int32_t idx) {
-        CHECK_GE(idx, 0);
-        CHECK_LT(idx, weights_.size());
-        return weights_.at(idx);
-    }
+base::Status Layer::forward(const tensor::Tensor& input1, const tensor::Tensor& input2,
+                            const tensor::Tensor& input3, const tensor::Tensor& input4,
+                            const tensor::Tensor& input5, const tensor::Tensor& output1) {
+    this->set_input(0, input1);
+    this->set_input(1, input2);
+    this->set_input(2, input3);
+    this->set_input(3, input4);
+    this->set_input(4, input5);
+
+    this->set_output(0, output1);
+    return this->forward();
+}
+
+tensor::Tensor& LayerParam::get_weight(int32_t idx) {
+    CHECK_GE(idx, 0);
+    CHECK_LT(idx, weights_.size());
+    return weights_.at(idx);
+}
 
 }  // namespace op

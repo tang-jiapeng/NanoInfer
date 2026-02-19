@@ -32,7 +32,6 @@
 #include "nanoinfer/op/attention.h"
 #include "nanoinfer/op/matmul.h"
 #include "nanoinfer/op/rmsnorm.h"
-#include "nanoinfer/op/rope.h"
 #include "nanoinfer/op/swiglu.h"
 
 namespace model {
