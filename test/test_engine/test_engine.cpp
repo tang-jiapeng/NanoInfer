@@ -129,11 +129,16 @@ TEST_F(EngineTest, SingleStepExecution) {
     EXPECT_EQ(req->state(), RequestState::kRunning);
     EXPECT_GE(req->num_computed_tokens(), 3);
 
-    // Step 2: Decode 1
+    // 注意: Prefill 结束时已采样第一个 token -> generated_len == 1
+    EXPECT_EQ(req->generated_len(), 1);
+    EXPECT_EQ(req->generated_tokens().front(), 3);
+
+    // Step 2: Decode step 1 (生成第 2 个 token)
     status = engine_->step();
     ASSERT_TRUE(status);
 
-    EXPECT_EQ(req->generated_len(), 1);
+    // Prefill 产生 1 个 + Decode step 1 产生 1 个 = 2 个生成 token
+    EXPECT_EQ(req->generated_len(), 2);
     EXPECT_EQ(req->generated_tokens().back(), 3);
 }
 
@@ -151,7 +156,9 @@ TEST_F(EngineTest, ContinuousBatching) {
     EXPECT_EQ(stats.num_running, 2);
 
     auto req2 = engine_->get_request(id2);
-    EXPECT_EQ(req1->generated_len(), 1);
+    // req1: Prefill 时生成1个 + Decode step 1 生成 1 个 = 2 个
+    EXPECT_EQ(req1->generated_len(), 2);
+    // req2: Prefill 一步完成 (prompt_len=4)
     EXPECT_GE(req2->num_computed_tokens(), 3);
 }
 

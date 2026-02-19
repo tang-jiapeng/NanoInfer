@@ -4,119 +4,109 @@
 #include "../utils.cuh"
 #include "nanoinfer/base/buffer.h"
 
-TEST(test_buffer, allocate) {
-    using namespace base;
-    auto alloc = base::CPUDeviceAllocatorFactory::get_instance();
-    Buffer buffer(32, alloc);
+// ===========================================================================
+// BufferTest — 测试 base::Buffer 的分配、外部指针、异构 memcpy
+// ===========================================================================
+class BufferTest : public ::testing::Test {
+   protected:
+    void SetUp() override {
+        cpu_alloc_ = base::CPUDeviceAllocatorFactory::get_instance();
+        gpu_alloc_ = base::CUDADeviceAllocatorFactory::get_instance();
+    }
+
+    std::shared_ptr<base::DeviceAllocator> cpu_alloc_;
+    std::shared_ptr<base::DeviceAllocator> gpu_alloc_;
+};
+
+// ---------------------------------------------------------------------------
+// 基本 CPU 分配
+TEST_F(BufferTest, AllocateCPU) {
+    base::Buffer buffer(32, cpu_alloc_);
     ASSERT_NE(buffer.ptr(), nullptr);
+    EXPECT_EQ(buffer.device_type(), base::DeviceType::kDeviceCPU);
+    EXPECT_EQ(buffer.byte_size(), 32u);
 }
 
-TEST(test_buffer, use_external) {
-    using namespace base;
-    auto alloc = base::CPUDeviceAllocatorFactory::get_instance();
+// ---------------------------------------------------------------------------
+// 外部指针 (不拥有内存)
+TEST_F(BufferTest, ExternalPointer) {
     float* ptr = new float[32];
-    Buffer buffer(32, nullptr, ptr, true);
-    ASSERT_EQ(buffer.is_external(), true);
+    base::Buffer buffer(32, nullptr, ptr, true);
+    EXPECT_TRUE(buffer.is_external());
+    EXPECT_EQ(buffer.ptr(), ptr);
     delete[] ptr;
 }
 
-TEST(test_buffer, cuda_memcpy1) {
-    using namespace base;
-    auto alloc = base::CPUDeviceAllocatorFactory::get_instance();
-    auto alloc_cu = base::CUDADeviceAllocatorFactory::get_instance();
+// ---------------------------------------------------------------------------
+// CPU -> CUDA memcpy
+TEST_F(BufferTest, MemcpyCPU2CUDA) {
+    const int32_t size = 32;
+    std::vector<float> src(size);
+    for (int i = 0; i < size; ++i) src[i] = float(i);
 
-    int32_t size = 32;
-    float* ptr = new float[size];
+    base::Buffer cpu_buf(size * sizeof(float), nullptr, src.data(), true);
+    cpu_buf.set_device_type(base::DeviceType::kDeviceCPU);
+    ASSERT_TRUE(cpu_buf.is_external());
+
+    base::Buffer cu_buf(size * sizeof(float), gpu_alloc_);
+    cu_buf.copy_from(cpu_buf);
+    EXPECT_EQ(cu_buf.device_type(), base::DeviceType::kDeviceCUDA);
+
+    std::vector<float> result(size, 0.f);
+    cudaMemcpy(result.data(), cu_buf.ptr(), sizeof(float) * size, cudaMemcpyDeviceToHost);
     for (int i = 0; i < size; ++i) {
-        ptr[i] = float(i);
+        EXPECT_FLOAT_EQ(result[i], float(i)) << "index " << i;
     }
-    Buffer buffer(size * sizeof(float), nullptr, ptr, true);
-    buffer.set_device_type(DeviceType::kDeviceCPU);
-    ASSERT_EQ(buffer.is_external(), true);
-
-    Buffer cu_buffer(size * sizeof(float), alloc_cu);
-    cu_buffer.copy_from(buffer);
-
-    float* ptr2 = new float[size];
-    cudaMemcpy(ptr2, cu_buffer.ptr(), sizeof(float) * size, cudaMemcpyDeviceToHost);
-    for (int i = 0; i < size; ++i) {
-        // ptr[i] = float(i);
-        ASSERT_EQ(ptr2[i], float(i));
-    }
-
-    delete[] ptr;
-    delete[] ptr2;
 }
 
-TEST(test_buffer, cuda_memcpy2) {
-    using namespace base;
-    auto alloc = base::CPUDeviceAllocatorFactory::get_instance();
-    auto alloc_cu = base::CUDADeviceAllocatorFactory::get_instance();
+// ---------------------------------------------------------------------------
+// CUDA -> CUDA memcpy
+TEST_F(BufferTest, MemcpyCUDA2CUDA) {
+    const int32_t size = 32;
+    base::Buffer cu_buf1(size * sizeof(float), gpu_alloc_);
+    base::Buffer cu_buf2(size * sizeof(float), gpu_alloc_);
 
-    int32_t size = 32;
-    float* ptr = new float[size];
+    set_value_cu((float*)cu_buf2.ptr(), size);
+    cu_buf1.copy_from(cu_buf2);  // D2D
+
+    std::vector<float> result(size, 0.f);
+    cudaMemcpy(result.data(), cu_buf1.ptr(), sizeof(float) * size, cudaMemcpyDeviceToHost);
     for (int i = 0; i < size; ++i) {
-        ptr[i] = float(i);
+        EXPECT_FLOAT_EQ(result[i], 1.f) << "index " << i;
     }
-    Buffer buffer(size * sizeof(float), nullptr, ptr, true);
-    buffer.set_device_type(DeviceType::kDeviceCPU);
-    ASSERT_EQ(buffer.is_external(), true);
-
-    // cpu to cuda
-    Buffer cu_buffer(size * sizeof(float), alloc_cu);
-    cu_buffer.copy_from(buffer);
-
-    float* ptr2 = new float[size];
-    cudaMemcpy(ptr2, cu_buffer.ptr(), sizeof(float) * size, cudaMemcpyDeviceToHost);
-    for (int i = 0; i < size; ++i) {
-        ASSERT_EQ(ptr2[i], float(i));
-    }
-
-    delete[] ptr;
-    delete[] ptr2;
 }
 
-TEST(test_buffer, cuda_memcpy3) {
-    using namespace base;
-    auto alloc = base::CPUDeviceAllocatorFactory::get_instance();
-    auto alloc_cu = base::CUDADeviceAllocatorFactory::get_instance();
+// ---------------------------------------------------------------------------
+// CUDA -> CPU memcpy
+TEST_F(BufferTest, MemcpyCUDA2CPU) {
+    const int32_t size = 32;
+    base::Buffer cu_buf(size * sizeof(float), gpu_alloc_);
+    base::Buffer cpu_buf(size * sizeof(float), cpu_alloc_);
 
-    int32_t size = 32;
-    Buffer cu_buffer1(size * sizeof(float), alloc_cu);
-    Buffer cu_buffer2(size * sizeof(float), alloc_cu);
+    set_value_cu((float*)cu_buf.ptr(), size);
+    cpu_buf.copy_from(cu_buf);  // D2H
 
-    set_value_cu((float*)cu_buffer2.ptr(), size);
-    // cu to cu
-    ASSERT_EQ(cu_buffer1.device_type(), DeviceType::kDeviceCUDA);
-    ASSERT_EQ(cu_buffer2.device_type(), DeviceType::kDeviceCUDA);
-
-    cu_buffer1.copy_from(cu_buffer2);
-
-    float* ptr2 = new float[size];
-    cudaMemcpy(ptr2, cu_buffer1.ptr(), sizeof(float) * size, cudaMemcpyDeviceToHost);
+    float* p = (float*)cpu_buf.ptr();
     for (int i = 0; i < size; ++i) {
-        ASSERT_EQ(ptr2[i], 1.f);
+        EXPECT_FLOAT_EQ(p[i], 1.f) << "index " << i;
     }
-    delete[] ptr2;
 }
 
-TEST(test_buffer, cuda_memcpy4) {
-    using namespace base;
-    auto alloc = base::CPUDeviceAllocatorFactory::get_instance();
-    auto alloc_cu = base::CUDADeviceAllocatorFactory::get_instance();
+// ---------------------------------------------------------------------------
+// CPU -> CPU memcpy
+TEST_F(BufferTest, MemcpyCPU2CPU) {
+    const int32_t size = 32;
+    std::vector<float> src(size);
+    for (int i = 0; i < size; ++i) src[i] = float(i) * 2.f;
 
-    int32_t size = 32;
-    Buffer cu_buffer1(size * sizeof(float), alloc_cu);
-    Buffer cu_buffer2(size * sizeof(float), alloc);
-    ASSERT_EQ(cu_buffer1.device_type(), DeviceType::kDeviceCUDA);
-    ASSERT_EQ(cu_buffer2.device_type(), DeviceType::kDeviceCPU);
+    base::Buffer src_buf(size * sizeof(float), nullptr, src.data(), true);
+    src_buf.set_device_type(base::DeviceType::kDeviceCPU);
 
-    // cu to cpu
-    set_value_cu((float*)cu_buffer1.ptr(), size);
-    cu_buffer2.copy_from(cu_buffer1);
+    base::Buffer dst_buf(size * sizeof(float), cpu_alloc_);
+    dst_buf.copy_from(src_buf);
 
-    float* ptr2 = (float*)cu_buffer2.ptr();
+    float* p = (float*)dst_buf.ptr();
     for (int i = 0; i < size; ++i) {
-        ASSERT_EQ(ptr2[i], 1.f);
+        EXPECT_FLOAT_EQ(p[i], float(i) * 2.f) << "index " << i;
     }
 }
