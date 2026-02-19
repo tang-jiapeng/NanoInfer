@@ -130,7 +130,7 @@ TEST_F(RoPEKernelTest, SinCosCacheGeneration) {
     // 2. 运行 GPU Kernel (生成表)
     auto sincos_cu = kernel::KernelRegistry::instance().get<kernel::SinCosCacheCalcKernelFn>(
         "sin_cos_cache_calc", base::DeviceType::kDeviceCUDA);
-    sincos_cu(head_size, max_seq_len, t_sin, t_cos, nullptr);
+    sincos_cu(head_size, max_seq_len, t_sin, t_cos, 10000.0f, nullptr);
     cudaDeviceSynchronize();
 
     // 3. 拷贝回 CPU

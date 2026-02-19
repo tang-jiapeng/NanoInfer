@@ -71,12 +71,12 @@ TEST_F(RMSNormComparisonTest, CompareCpuWithGpu) {
     // 5. 运行 CPU Kernel
     auto rmsnorm_cpu = kernel::KernelRegistry::instance().get<kernel::RMSNormKernelFn>(
         "rmsnorm", base::DeviceType::kDeviceCPU);
-    rmsnorm_cpu(t_in_cpu, t_wei_cpu, t_out_cpu, nullptr);
+    rmsnorm_cpu(t_in_cpu, t_wei_cpu, t_out_cpu, 1e-5f, nullptr);
 
     // 6. 运行 GPU Kernel
     auto rmsnorm_cu = kernel::KernelRegistry::instance().get<kernel::RMSNormKernelFn>(
         "rmsnorm", base::DeviceType::kDeviceCUDA);
-    rmsnorm_cu(t_in_gpu, t_wei_gpu, t_out_gpu, nullptr);
+    rmsnorm_cu(t_in_gpu, t_wei_gpu, t_out_gpu, 1e-5f, nullptr);
     cudaDeviceSynchronize();  // 确保 GPU 跑完
 
     // 7. 拷贝 GPU 结果回 Host 用于对比

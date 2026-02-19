@@ -108,15 +108,16 @@ __global__ void row_rmsnorm_f32(const float* input, const float* weight, float* 
  * @brief RMSNorm Host 包装函数
  *
  * 从 Tensor 提取指针和维度，配置 Grid = total_tokens, Block = 128，
- * 启动 row_rmsnorm_f32<128> 模板内核。eps 硬编码为 1e-6。
+ * 启动 row_rmsnorm_f32<128> 模板内核。eps 由外部传入。
  *
  * @param input   输入 Tensor [total_tokens, hidden_dim]，CUDA 设备
  * @param weight  归一化权重 Tensor [hidden_dim]，CUDA 设备
  * @param output  输出 Tensor [total_tokens, hidden_dim]，CUDA 设备
+ * @param eps     RMSNorm 的 epsilon
  * @param stream  CUDA Stream
  */
 void rmsnorm_kernel_cu(const tensor::Tensor& input, const tensor::Tensor& weight,
-                       const tensor::Tensor& output, void* stream) {
+                       const tensor::Tensor& output, const float eps, void* stream) {
     CHECK(!input.is_empty());
     CHECK(!weight.is_empty());
     CHECK(!output.is_empty());
@@ -133,8 +134,6 @@ void rmsnorm_kernel_cu(const tensor::Tensor& input, const tensor::Tensor& weight
     // 简单的维度校验
     CHECK_EQ(weight.get_dim(0), hidden_dim) << "Weight dim mismatch";
     CHECK_EQ(input.size(), output.size());
-
-    const float eps = 1e-6f;
 
     // Grid Size = total_tokens (每行一个 Block)
     constexpr int threads_per_block = 128;  // 一般 128 或 256 足够处理

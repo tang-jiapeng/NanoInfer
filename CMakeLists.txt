@@ -13,22 +13,6 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 14)
 
-option(LLAMA3_SUPPORT OFF)
-if (LLAMA3_SUPPORT)
-    message(STATUS "LLAMA3 SUPPORT")
-    add_definitions(-DLLAMA3_SUPPORT)
-endif()
-option(QWEN2_SUPPORT OFF)
-if (QWEN2_SUPPORT)
-    message(STATUS "QWEN2 SUPPORT")
-    add_definitions(-DQWEN2_SUPPORT)
-endif()
-
-option(QWEN3_SUPPORT OFF)
-if (QWEN3_SUPPORT)
-    message(STATUS "QWEN3 SUPPORT")
-    add_definitions(-DQWEN3_SUPPORT)
-endif()
 # ---- Add dependencies via CPM ----
 # see https://github.com/TheLartians/CPM.cmake for more info
 option(USE_CPM "Use CPM for dependency management" ON)
@@ -63,24 +47,22 @@ if(USE_CPM)
     )
     find_package(sentencepiece REQUIRED)
 
-    if (LLAMA3_SUPPORT OR QWEN2_SUPPORT OR QWEN3_SUPPORT)
-        CPMAddPackage(
-                NAME absl
-                GITHUB_REPOSITORY abseil/abseil-cpp
-                GIT_TAG 20240722.0
-                OPTIONS "BUILD_TESTING Off" "ABSL_PROPAGATE_CXX_STD ON" "ABSL_ENABLE_INSTALL ON"
-        )
-        CPMAddPackage(
-                NAME re2
-                GITHUB_REPOSITORY google/re2
-                GIT_TAG 2024-07-02
-        )
-        CPMAddPackage(
-                NAME nlohmann_json
-                GITHUB_REPOSITORY nlohmann/json
-                VERSION 3.11.3
-        )
-    endif()
+    CPMAddPackage(
+            NAME absl
+            GITHUB_REPOSITORY abseil/abseil-cpp
+            GIT_TAG 20240722.0
+            OPTIONS "BUILD_TESTING Off" "ABSL_PROPAGATE_CXX_STD ON" "ABSL_ENABLE_INSTALL ON"
+    )
+    CPMAddPackage(
+            NAME re2
+            GITHUB_REPOSITORY google/re2
+            GIT_TAG 2024-07-02
+    )
+    CPMAddPackage(
+            NAME nlohmann_json
+            GITHUB_REPOSITORY nlohmann/json
+            VERSION 3.11.3
+    )
 endif()
 
 # ---------------------------------
@@ -103,15 +85,17 @@ aux_source_directory(src/op/kernels/cuda DIR_KERNEL_CUDA)
 aux_source_directory(src/op/kernels/ DIR_KERNEL)
 aux_source_directory(src/sampler DIR_SAMPLE)
 aux_source_directory(src/engine DIR_ENGINE)
+aux_source_directory(third_party/tiktoken DIR_TIKTOKEN)
 
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/lib)
 
-add_library(llama SHARED ${DIR_TENSOR} ${DIR_BASE} ${DIR_OP} ${DIR_KERNEL} ${DIR_MODEL} ${DIR_KERNEL_CPU} ${DIR_KERNEL_CUDA} ${DIR_KERNEL} ${DIR_SAMPLE} ${DIR_ENGINE})
-target_link_libraries(llama sentencepiece glog::glog gtest gtest_main pthread cudart cublas armadillo OpenMP::OpenMP_CXX)
+add_library(llama SHARED ${DIR_TENSOR} ${DIR_BASE} ${DIR_OP} ${DIR_KERNEL} ${DIR_MODEL} ${DIR_KERNEL_CPU} ${DIR_KERNEL_CUDA} ${DIR_KERNEL} ${DIR_SAMPLE} ${DIR_ENGINE} ${DIR_TIKTOKEN})
+target_link_libraries(llama sentencepiece glog::glog gtest gtest_main pthread cudart cublas armadillo OpenMP::OpenMP_CXX absl::base re2::re2 nlohmann_json::nlohmann_json)
 target_link_directories(llama PUBLIC ${CMAKE_CUDA_COMPILER_LIBRARY_ROOT}/lib64)
 
 target_include_directories(llama PUBLIC ${glog_INCLUDE_DIR})
 target_include_directories(llama PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_include_directories(llama PUBLIC ${PROJECT_SOURCE_DIR}/third_party/tiktoken)
 target_include_directories(llama PUBLIC ${Armadillo_INCLUDE_DIR})
 target_include_directories(llama PUBLIC ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
 

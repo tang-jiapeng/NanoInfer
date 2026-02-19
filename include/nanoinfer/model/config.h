@@ -9,7 +9,7 @@
 
 namespace model {
 
-/// @brief 模型基本超参数（直接来自权重文件头）
+/// @brief 模型基本超参数（直接来自权重文件头，格式严格与导出脚本一致）
 struct ModelConfig {
     int32_t dim = 0;
     int32_t hidden_dim = 0;
@@ -42,6 +42,9 @@ struct TransformerConfig {
 
     int32_t bos_token_id_ = -1;
     int32_t eos_token_id_ = -1;
+
+    float rope_theta_ = 10000.0f;  ///< RoPE 基础频率 (LLama2=10000, LLama3=500000)
+    float norm_eps_ = 1e-5f;       ///< RMSNorm epsilon
 };
 
 /// @brief 推理中间 Buffer 类型枚举

@@ -95,10 +95,12 @@ using SwigluKernelFn = void (*)(const tensor::Tensor& input1, const tensor::Tens
  * @param input 输入张量
  * @param weight 归一化权重 (gamma)
  * @param output 输出张量
+ * @param eps RMSNorm 的 epsilon
  * @param stream_or_config CUDA 流指针 (cudaStream_t)
  */
 using RMSNormKernelFn = void (*)(const tensor::Tensor& input, const tensor::Tensor& weight,
-                                 const tensor::Tensor& output, void* stream_or_config);
+                                 const tensor::Tensor& output, const float eps,
+                                 void* stream_or_config);
 
 /**
  * @brief 旋转位置编码 (RoPE) Kernel 协议
@@ -125,11 +127,13 @@ using RoPEKernelFn = void (*)(int32_t dim, int32_t kv_dim, int32_t head_size,
  * @param max_seq_len 模型支持的最大上下文/序列长度
  * @param sin_cache 输出的 Sin 缓存张量 [max_seq_len, head_size]
  * @param cos_cache 输出的 Cos 缓存张量 [max_seq_len, head_size]
+ * @param rope_theta RoPE theta 参数
  * @param stream_or_config CUDA 流指针 (cudaStream_t)
  */
 using SinCosCacheCalcKernelFn = void (*)(int32_t head_size, int32_t max_seq_len,
                                          const tensor::Tensor& sin_cache,
-                                         const tensor::Tensor& cos_cache, void* stream_or_config);
+                                         const tensor::Tensor& cos_cache, const float rope_theta,
+                                         void* stream_or_config);
 
 /**
  * @brief Paged KV Cache 写入 Kernel 协议

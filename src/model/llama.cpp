@@ -83,10 +83,10 @@ void LLamaLayers::to_cuda(std::shared_ptr<kernel::CudaConfig> config) {
     to_cuda_vec(rmsnorm_layers_);
 }
 
-LLamaModel::LLamaModel(base::TokenizerType tokenizer_type, std::string token_path,
-                       std::string model_path, bool is_quant_model)
-    : Model(tokenizer_type, base::ModelType::kModelTypeLLama2, std::move(token_path),
-            std::move(model_path), is_quant_model) {
+LLamaModel::LLamaModel(base::TokenizerType tokenizer_type, base::ModelType model_type,
+                       std::string token_path, std::string model_path, bool is_quant_model)
+    : Model(tokenizer_type, model_type, std::move(token_path), std::move(model_path),
+            is_quant_model) {
 }
 
 /**
@@ -127,7 +127,7 @@ void LLamaModel::init_rope_cache() {
             return;
         }
 
-        sin_cos_cal_kernel(head_size, max_seq_len, sin_cache_, cos_cache_,
+        sin_cos_cal_kernel(head_size, max_seq_len, sin_cache_, cos_cache_, config_->rope_theta_,
                            cuda_config_ ? cuda_config_->stream : nullptr);
 
         cudaStreamSynchronize(static_cast<cudaStream_t>(cuda_config_->stream));
@@ -137,8 +137,9 @@ void LLamaModel::init_rope_cache() {
         std::vector<float> h_cos(max_seq_len * head_size);
         for (int pos = 0; pos < max_seq_len; ++pos) {
             for (int i = 0; i < head_size; ++i) {
-                float freq = 1.0f / std::pow(10000.0f, static_cast<float>(i / 2 * 2) /
-                                                           static_cast<float>(head_size));
+                float freq =
+                    1.0f / std::pow(config_->rope_theta_,
+                                    static_cast<float>(i / 2 * 2) / static_cast<float>(head_size));
                 float val = static_cast<float>(pos) * freq;
                 h_sin[pos * head_size + i] = std::sin(val);
                 h_cos[pos * head_size + i] = std::cos(val);
@@ -552,7 +553,7 @@ void LLamaModel::create_param_quant_layers() {
     // 包含：[AttnNorm * LayerNum, FFN Norm * LayerNum, Final Norm]
     for (int32_t i = 0; i < 2 * config_->layer_num_ + 1; ++i) {
         std::shared_ptr<op::RmsNormLayer> rms_norm_layer =
-            std::make_shared<op::RmsNormLayer>(device_type_, dim);
+            std::make_shared<op::RmsNormLayer>(device_type_, dim, config_->norm_eps_);
 
         rms_norm_layer->set_weight(0, {dim}, weight_ptr, cpu_device_type);
         llama_layers_->rmsnorm_layers_.push_back(rms_norm_layer);
@@ -564,7 +565,7 @@ void LLamaModel::create_param_quant_layers() {
  * @brief 创建并加载 FP32 权重层
  *
  * 文件布局（llama2c 导出格式，按参数类型分组）：
- *   Embedding [vocab×dim]
+ *   Embedding [vocab × dim]
  *   AttnNorm  [layer_num × dim]     ← RMSNorm 权重穿插在权重之间
  *   Wq        [layer_num × dim×dim]
  *   Wk        [layer_num × kv_dim×dim]
@@ -682,7 +683,7 @@ void LLamaModel::create_param_layers() {
 
     for (int32_t i = 0; i < config_->layer_num_; ++i) {
         std::shared_ptr<op::RmsNormLayer> rms_norm_layer =
-            std::make_shared<op::RmsNormLayer>(device_type_, config_->dim_);
+            std::make_shared<op::RmsNormLayer>(device_type_, config_->dim_, config_->norm_eps_);
 
         const void* weight_rmsnorm = raw_model_data_->weight(rmsnorm_pos);
         rms_norm_layer->set_weight(0, {config_->dim_}, weight_rmsnorm, cpu_device_type);
@@ -700,7 +701,7 @@ void LLamaModel::create_param_layers() {
 
     for (int32_t i = 0; i < config_->layer_num_; ++i) {
         std::shared_ptr<op::RmsNormLayer> rms_norm_layer =
-            std::make_shared<op::RmsNormLayer>(device_type_, config_->dim_);
+            std::make_shared<op::RmsNormLayer>(device_type_, config_->dim_, config_->norm_eps_);
         const void* weight_rmsnorm = raw_model_data_->weight(rmsnorm_pos);
         rms_norm_layer->set_weight(0, {config_->dim_}, weight_rmsnorm, cpu_device_type);
         llama_layers_->rmsnorm_layers_.push_back(rms_norm_layer);
@@ -714,7 +715,7 @@ void LLamaModel::create_param_layers() {
     rmsnorm_pos += config_->layer_num_ * config_->hidden_dim_ * config_->dim_;
 
     std::shared_ptr<op::RmsNormLayer> rms_final_layer =
-        std::make_shared<op::RmsNormLayer>(device_type_, config_->dim_);
+        std::make_shared<op::RmsNormLayer>(device_type_, config_->dim_, config_->norm_eps_);
 
     const void* weight_rmsnorm_final = raw_model_data_->weight(rmsnorm_pos);
     rms_final_layer->set_weight(0, {config_->dim_}, weight_rmsnorm_final, cpu_device_type);

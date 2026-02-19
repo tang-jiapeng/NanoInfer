@@ -139,9 +139,25 @@ base::Status Model::generate_model_infos(const ModelConfig& config) const {
     config_->kv_head_num_ = config.kv_head_num;
     config_->seq_len_ = config.seq_len;
 
-    // Llama 2 的标准: BOS=1, EOS=2
-    config_->bos_token_id_ = 1;
-    config_->eos_token_id_ = 2;
+    switch (model_type_) {
+        case base::ModelType::kModelTypeLLaMA2:
+            config_->norm_eps_ = 1e-5f;
+            config_->rope_theta_ = 10000.0f;
+            config_->bos_token_id_ = 1;
+            config_->eos_token_id_ = 2;
+            break;
+        case base::ModelType::kModelTypeLLaMA3:
+            config_->norm_eps_ = 1e-6f;
+            config_->rope_theta_ = 500000.0f;
+            config_->bos_token_id_ = 128000;
+            config_->eos_token_id_ = 128001;
+            break;
+        default:
+            // 其它模型由 tokenizer 提供 bos/eos
+            config_->bos_token_id_ = -1;
+            config_->eos_token_id_ = -1;
+            break;
+    }
 
     config_->kv_dim_ = (config.dim * config.kv_head_num) / config.head_num;
     config_->kv_mul_ = config.head_num / config.kv_head_num;
@@ -164,6 +180,8 @@ base::Status Model::create_encode_layer() {
     // create token encode decode layer
     if (tokenizer_type_ == TokenizerType::kEncodeSpe) {
         encode_layer_ = std::make_unique<op::SpeEncodeLayer>(this->token_path_, true, false);
+    } else if (tokenizer_type_ == TokenizerType::kEncodeBpe) {
+        encode_layer_ = std::make_unique<op::BpeEncodeLayer>(this->token_path_, true, false);
     }
 
     if (!encode_layer_) {

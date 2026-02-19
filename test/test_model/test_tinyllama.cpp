@@ -23,7 +23,8 @@ class TinyLlamaTest : public ::testing::Test {
    protected:
     void SetUp() override {
         // 使用 TestLLamaModel 实例化
-        model_ = std::make_unique<TestLLamaModel>(base::TokenizerType::kEncodeSpe, TOKEN_PATH,
+        model_ = std::make_unique<TestLLamaModel>(base::TokenizerType::kEncodeSpe,
+                                                  base::ModelType::kModelTypeLLaMA2, TOKEN_PATH,
                                                   MODEL_PATH,
                                                   false  // is_quant_model
         );

@@ -90,7 +90,8 @@ int main(int argc, char** argv) {
     // ==================================================================
     auto t_load_start = std::chrono::high_resolution_clock::now();
     LOG(INFO) << "Loading model from: " << MODEL_PATH;
-    auto model = std::make_unique<model::LLamaModel>(base::TokenizerType::kEncodeSpe, TOKEN_PATH,
+    auto model = std::make_unique<model::LLamaModel>(base::TokenizerType::kEncodeSpe,
+                                                     base::ModelType::kModelTypeLLaMA2, TOKEN_PATH,
                                                      MODEL_PATH, false);
     model->init(base::DeviceType::kDeviceCPU);
     auto t_load_end = std::chrono::high_resolution_clock::now();

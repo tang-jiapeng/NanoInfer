@@ -43,7 +43,7 @@ struct LLamaLayers {
  */
 class LLamaModel : public Model {
    public:
-    explicit LLamaModel(base::TokenizerType tokenizer_type, std::string token_path,
+    explicit LLamaModel(base::TokenizerType tokenizer_type, base::ModelType model_type, std::string token_path,
                         std::string model_path, bool is_quant_model);
 
     ~LLamaModel() = default;

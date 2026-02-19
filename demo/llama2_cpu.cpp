@@ -32,9 +32,8 @@ static void print_separator(int width = 70) {
 }
 
 static void print_step_info(int step, const engine::Scheduler::Stats& stats) {
-    std::cout << "  [Step " << std::setw(4) << step << "] "
-              << "Running: " << stats.num_running << "  |  "
-              << "Waiting: " << stats.num_waiting << "  |  "
+    std::cout << "  [Step " << std::setw(4) << step << "] " << "Running: " << stats.num_running
+              << "  |  " << "Waiting: " << stats.num_waiting << "  |  "
               << "Finished: " << stats.num_finished << "\r" << std::flush;
 }
 
@@ -50,7 +49,8 @@ int main(int argc, char** argv) {
     // 1. 加载模型 (CPU 模式)
     // ==================================================================
     LOG(INFO) << "Loading model from: " << MODEL_PATH;
-    auto model = std::make_unique<model::LLamaModel>(base::TokenizerType::kEncodeSpe, TOKEN_PATH,
+    auto model = std::make_unique<model::LLamaModel>(base::TokenizerType::kEncodeSpe,
+                                                     base::ModelType::kModelTypeLLaMA2, TOKEN_PATH,
                                                      MODEL_PATH, false);
     model->init(base::DeviceType::kDeviceCPU);
     LOG(INFO) << "Model loaded (CPU). Vocab=" << model->config().vocab_size_
@@ -162,10 +162,9 @@ int main(int argc, char** argv) {
         total_prompt_tokens += prompt_len;
         total_generated_tokens += gen_len;
 
-        std::cout << "\n[Request " << rid << "]  "
-                  << "(prompt=" << prompt_len << ", generated=" << gen_len
-                  << ", latency=" << std::fixed << std::setprecision(2) << latency << "s)"
-                  << std::endl;
+        std::cout << "\n[Request " << rid << "]  " << "(prompt=" << prompt_len
+                  << ", generated=" << gen_len << ", latency=" << std::fixed << std::setprecision(2)
+                  << latency << "s)" << std::endl;
 
         std::cout << "  Prompt:    " << prompts[i].text << std::endl;
         std::cout << "  Generated: " << generated_text << std::endl;

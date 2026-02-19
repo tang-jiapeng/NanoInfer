@@ -35,7 +35,8 @@ enum class DataType : uint8_t {
 /// @brief 模型架构类型
 enum class ModelType : uint8_t {
     kModelTypeUnknown = 0,
-    kModelTypeLLama2 = 1,  ///< LLaMA-2
+    kModelTypeLLaMA2 = 1,  ///< LLaMA-2
+    kModelTypeLLaMA3 = 2,  ///< LLaMA-3
 };
 
 /// @brief 获取 DataType 对应的字节大小

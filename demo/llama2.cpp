@@ -69,7 +69,8 @@ int main(int argc, char** argv) {
     // 1. 加载模型
     // ===================================================================
     LOG(INFO) << "Loading model...";
-    auto model = std::make_unique<model::LLamaModel>(base::TokenizerType::kEncodeSpe, TOKEN_PATH,
+    auto model = std::make_unique<model::LLamaModel>(base::TokenizerType::kEncodeSpe,
+                                                     base::ModelType::kModelTypeLLaMA2, TOKEN_PATH,
                                                      MODEL_PATH, false);
     model->init(base::DeviceType::kDeviceCUDA);
 
@@ -220,10 +221,10 @@ int main(int argc, char** argv) {
     // 统计信息
     // ===================================================================
     std::cout << "\n\n======================================" << std::endl;
-    std::cout << "Prefill:  " << input_ids.size() << " tokens, " << prefill_ms << " ms"
-              << " (" << (input_ids.size() * 1000.0 / prefill_ms) << " tok/s)" << std::endl;
-    std::cout << "Decode:   " << generated_count << " tokens, " << decode_ms << " ms"
-              << " (" << (generated_count * 1000.0 / decode_ms) << " tok/s)" << std::endl;
+    std::cout << "Prefill:  " << input_ids.size() << " tokens, " << prefill_ms << " ms" << " ("
+              << (input_ids.size() * 1000.0 / prefill_ms) << " tok/s)" << std::endl;
+    std::cout << "Decode:   " << generated_count << " tokens, " << decode_ms << " ms" << " ("
+              << (generated_count * 1000.0 / decode_ms) << " tok/s)" << std::endl;
     std::cout << "Total:    " << (input_ids.size() + generated_count) << " tokens" << std::endl;
 
     return 0;

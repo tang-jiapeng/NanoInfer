@@ -25,10 +25,12 @@ namespace kernel {
  * @param input   输入 Tensor [total_tokens, hidden_dim]，CPU 设备
  * @param weight  归一化权重 Tensor [hidden_dim]，所有行共享
  * @param output  输出 Tensor，与 input 同 shape
+ * @param eps     RMSNorm 的 epsilon
  * @param stream  未使用
  */
 void rmsnorm_kernel_cpu(const tensor::Tensor& input, const tensor::Tensor& weight,
-                        const tensor::Tensor& output, [[maybe_unused]] void* stream) {
+                        const tensor::Tensor& output, const float eps,
+                        [[maybe_unused]] void* stream) {
     CHECK(!input.is_empty());
     CHECK(!weight.is_empty());
     CHECK(!output.is_empty());
@@ -61,12 +63,6 @@ void rmsnorm_kernel_cpu(const tensor::Tensor& input, const tensor::Tensor& weigh
 
     // 包装 Weight (权重全行共享)
     arma::fvec wei_tensor(const_cast<float*>(wei_ptr), hidden_dim, false, true);
-
-#if defined(QWEN2_SUPPORT) || defined(QWEN3_SUPPORT)
-    const float eps = 1e-6f;
-#else
-    const float eps = 1e-5f;
-#endif
 
     for (int i = 0; i < total_tokens; ++i) {
         // 计算偏移量

@@ -11,8 +11,8 @@
 #include "kernels/kernel_types.h"
 
 namespace op {
-RmsNormLayer::RmsNormLayer(base::DeviceType device_type, int32_t dim)
-    : LayerParam(device_type, LayerType::kLayerRMSNorm, false, "RMSNorm"), dim_(dim) {
+RmsNormLayer::RmsNormLayer(base::DeviceType device_type, int32_t dim, float eps)
+    : LayerParam(device_type, LayerType::kLayerRMSNorm, false, "RMSNorm"), dim_(dim), eps_(eps) {
     reset_input_size(1);
     reset_output_size(1);
     reset_weight_size(1);
@@ -63,7 +63,7 @@ base::Status RmsNormLayer::forward() {
         return base::error::InternalError("RMSNorm kernel not found for device: " +
                                           std::to_string(static_cast<int>(device_type_)));
     }
-    rmsnorm_kernel(get_input(0), get_weight(0), get_output(0),
+    rmsnorm_kernel(get_input(0), get_weight(0), get_output(0), eps_, 
                    cuda_config_ ? cuda_config_->stream : nullptr);
     return base::error::Success();
 }

@@ -87,7 +87,7 @@ __global__ void rope_kernel_cu_fp32(int32_t total_tokens, int32_t dim, int32_t k
 // Grid: (total_elements + 255) / 256
 // Block: 256
 __global__ void sin_cos_calc_kernel(int head_size, int max_seq_len, float* sin_cache,
-                                    float* cos_cache) {
+                                    float* cos_cache, const float rope_theta) {
     // 展平索引：idx = pos * head_size + head_dim
     int idx = threadIdx.x + blockDim.x * blockIdx.x;
     int total_elements = head_size * max_seq_len;
@@ -98,10 +98,10 @@ __global__ void sin_cos_calc_kernel(int head_size, int max_seq_len, float* sin_c
     int pos = idx / head_size;
     int head_dim = idx % head_size;
 
-    // Llama RoPE 频率公式: theta = 10000 ^ (-2(i/2)/d)
+    // Llama RoPE 频率公式: theta = rope_theta ^ (-2(i/2)/d)
     // 关键: 使用 (head_dim / 2 * 2) 确保偶数对共享频率
     float freq_exponent = static_cast<float>(head_dim / 2 * 2) / static_cast<float>(head_size);
-    float freq = 1.0f / powf(10000.0f, freq_exponent);
+    float freq = 1.0f / powf(rope_theta, freq_exponent);
 
     float val = static_cast<float>(pos) * freq;
 
@@ -119,10 +119,11 @@ __global__ void sin_cos_calc_kernel(int head_size, int max_seq_len, float* sin_c
  * @param max_seq_len  支持的最大序列长度
  * @param sin_cache    输出 Sin 缓存 Tensor [max_seq_len × head_size]，CUDA 设备
  * @param cos_cache    输出 Cos 缓存 Tensor [max_seq_len × head_size]，CUDA 设备
+ * @param rope_theta   RoPE theta 参数
  * @param stream       CUDA Stream
  */
 void sin_cos_cache_calc_cu(int head_size, int max_seq_len, const tensor::Tensor& sin_cache,
-                           const tensor::Tensor& cos_cache, void* stream) {
+                           const tensor::Tensor& cos_cache, const float rope_theta, void* stream) {
     CHECK(!sin_cache.is_empty());
     CHECK(!cos_cache.is_empty());
 
@@ -134,7 +135,7 @@ void sin_cos_cache_calc_cu(int head_size, int max_seq_len, const tensor::Tensor&
 
     sin_cos_calc_kernel<<<blocks, threads, 0, cuda_stream>>>(
         head_size, max_seq_len, const_cast<float*>(sin_cache.ptr<float>()),
-        const_cast<float*>(cos_cache.ptr<float>()));
+        const_cast<float*>(cos_cache.ptr<float>()), rope_theta);
 }
 
 /**
