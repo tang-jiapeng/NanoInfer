@@ -3,13 +3,11 @@
 #include <gtest/gtest.h>
 #include <random>
 #include <vector>
-#include "../src/op/kernels/cpu/matmul_kernel.h"
-#include "../src/op/kernels/cuda/matmul_kernel.cuh"
+#include "../src/op/kernels/kernel_registry.h"
+#include "../src/op/kernels/kernel_types.h"
 #include "nanoinfer/base/base.h"
 #include "nanoinfer/base/cuda_config.h"
 #include "nanoinfer/tensor/tensor.h"
-
-using namespace kernel;
 
 class MatMulKernelTest : public ::testing::Test {
    protected:
@@ -18,14 +16,14 @@ class MatMulKernelTest : public ::testing::Test {
         gpu_alloc_ = base::CUDADeviceAllocatorFactory::get_instance();
 
         // Init cuBLAS
-        cuda_config_ = std::make_unique<CudaConfig>();
+        cuda_config_ = std::make_unique<kernel::CudaConfig>();
         cublasStatus_t status = cublasCreate(&cuda_config_->cublas_handle);
         ASSERT_EQ(status, CUBLAS_STATUS_SUCCESS) << "Failed to create cuBLAS handle";
     }
 
     std::shared_ptr<base::DeviceAllocator> cpu_alloc_;
     std::shared_ptr<base::DeviceAllocator> gpu_alloc_;
-    std::unique_ptr<CudaConfig> cuda_config_;
+    std::unique_ptr<kernel::CudaConfig> cuda_config_;
 };
 
 TEST_F(MatMulKernelTest, CompareCpuWithGpu) {
@@ -64,10 +62,14 @@ TEST_F(MatMulKernelTest, CompareCpuWithGpu) {
     cudaMemcpy(gpu_wei.ptr<void>(), h_wei.data(), wei_size * sizeof(float), cudaMemcpyHostToDevice);
 
     // 4. Run CPU
-    kernel::matmul_kernel_cpu(cpu_in, cpu_wei, cpu_out, 1.0f, nullptr);
+    auto matmul_cpu = kernel::KernelRegistry::instance().get<kernel::MatmulKernelFn>(
+        "matmul", base::DeviceType::kDeviceCPU);
+    matmul_cpu(cpu_in, cpu_wei, cpu_out, 1.0f, nullptr);
 
     // 5. Run GPU
-    kernel::matmul_kernel_cu(gpu_in, gpu_wei, gpu_out, 1.0f, cuda_config_.get());
+    auto matmul_cu = kernel::KernelRegistry::instance().get<kernel::MatmulKernelFn>(
+        "matmul", base::DeviceType::kDeviceCUDA);
+    matmul_cu(gpu_in, gpu_wei, gpu_out, 1.0f, cuda_config_.get());
     cudaDeviceSynchronize();
 
     // 6. Check Results

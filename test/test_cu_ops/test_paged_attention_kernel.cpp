@@ -2,9 +2,11 @@
 #include <gtest/gtest.h>
 #include <cmath>
 #include <vector>
+#include "../src/op/kernels/kernel_registry.h"
+#include "../src/op/kernels/kernel_types.h"
 #include "nanoinfer/base/base.h"
 #include "nanoinfer/tensor/tensor.h"
-#include "../src/op/kernels/cuda/paged_attention_kernel.cuh"
+
 
 class PagedAttentionTest : public ::testing::Test {
    protected:
@@ -15,7 +17,6 @@ class PagedAttentionTest : public ::testing::Test {
 };
 
 TEST_F(PagedAttentionTest, LlamaStyleParams) {
-
     // === 模拟 Llama-2-7B 的配置 ===
     // Head Size = 128
     // Block Size = 16
@@ -68,8 +69,10 @@ TEST_F(PagedAttentionTest, LlamaStyleParams) {
     cudaMemcpy(t_lens.ptr<void>(), h_lens.data(), h_lens.size() * 4, cudaMemcpyHostToDevice);
 
     // 3. Run
-    kernel::paged_attention_kernel(t_q, t_out, t_k_c, t_v_c, t_tbl, t_lens, context_len, num_heads,
-                                   num_kv_heads, head_size, block_size, scale, nullptr);
+    auto pa_cu = kernel::KernelRegistry::instance().get<kernel::PagedAttentionKernelFn>(
+        "paged_attention", base::DeviceType::kDeviceCUDA);
+    pa_cu(t_q, t_out, t_k_c, t_v_c, t_tbl, t_lens, context_len, num_heads, num_kv_heads, head_size,
+          block_size, scale, nullptr);
     cudaDeviceSynchronize();
 
     // 4. Verify

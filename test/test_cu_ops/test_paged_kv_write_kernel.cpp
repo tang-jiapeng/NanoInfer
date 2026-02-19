@@ -2,10 +2,10 @@
 #include <gtest/gtest.h>
 #include <random>
 #include <vector>
+#include "../src/op/kernels/kernel_registry.h"
+#include "../src/op/kernels/kernel_types.h"
 #include "nanoinfer/base/base.h"
 #include "nanoinfer/tensor/tensor.h"
-#include "../src/op/kernels/cuda/paged_kv_write_kernel.cuh"
-
 
 class PagedKVWriteTest : public ::testing::Test {
    protected:
@@ -16,7 +16,6 @@ class PagedKVWriteTest : public ::testing::Test {
 };
 
 TEST_F(PagedKVWriteTest, BasicWrite) {
-
     // === 1. 参数设置 ===
     int32_t batch_size = 2;
     int32_t num_kv_heads = 2;
@@ -76,8 +75,10 @@ TEST_F(PagedKVWriteTest, BasicWrite) {
                cudaMemcpyHostToDevice);
 
     // === 4. Run Kernel ===
-    kernel::paged_kv_write_kernel(t_k, t_v, t_k_cache, t_v_cache, t_block_table, t_pos,
-                                  num_kv_heads, head_size, block_size, nullptr);
+    auto kv_write_cu = kernel::KernelRegistry::instance().get<kernel::PagedKVWriteKernelFn>(
+        "paged_kv_write", base::DeviceType::kDeviceCUDA);
+    kv_write_cu(t_k, t_v, t_k_cache, t_v_cache, t_block_table, t_pos, num_kv_heads, head_size,
+                block_size, nullptr);
     cudaDeviceSynchronize();
 
     // === 5. Verify ===

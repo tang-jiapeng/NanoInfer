@@ -3,8 +3,8 @@
 #include <cmath>
 #include <random>
 #include <vector>
-#include "../src/op/kernels/cpu/rmsnorm_kernel.h"
-#include "../src/op/kernels/cuda/rmsnorm_kernel.cuh"
+#include "../src/op/kernels/kernel_registry.h"
+#include "../src/op/kernels/kernel_types.h"
 #include "nanoinfer/base/base.h"
 #include "nanoinfer/tensor/tensor.h"
 
@@ -69,10 +69,14 @@ TEST_F(RMSNormComparisonTest, CompareCpuWithGpu) {
                cudaMemcpyHostToDevice);
 
     // 5. 运行 CPU Kernel
-    kernel::rmsnorm_kernel_cpu(t_in_cpu, t_wei_cpu, t_out_cpu, nullptr);
+    auto rmsnorm_cpu = kernel::KernelRegistry::instance().get<kernel::RMSNormKernelFn>(
+        "rmsnorm", base::DeviceType::kDeviceCPU);
+    rmsnorm_cpu(t_in_cpu, t_wei_cpu, t_out_cpu, nullptr);
 
     // 6. 运行 GPU Kernel
-    kernel::rmsnorm_kernel_cu(t_in_gpu, t_wei_gpu, t_out_gpu, nullptr);
+    auto rmsnorm_cu = kernel::KernelRegistry::instance().get<kernel::RMSNormKernelFn>(
+        "rmsnorm", base::DeviceType::kDeviceCUDA);
+    rmsnorm_cu(t_in_gpu, t_wei_gpu, t_out_gpu, nullptr);
     cudaDeviceSynchronize();  // 确保 GPU 跑完
 
     // 7. 拷贝 GPU 结果回 Host 用于对比

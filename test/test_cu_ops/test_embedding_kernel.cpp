@@ -2,8 +2,8 @@
 #include <gtest/gtest.h>
 #include <random>
 #include <vector>
-#include "../src/op/kernels/cpu/embedding_kernel.h"
-#include "../src/op/kernels/cuda/embedding_kernel.cuh"
+#include "../src/op/kernels/kernel_registry.h"
+#include "../src/op/kernels/kernel_types.h"
 #include "nanoinfer/base/base.h"
 #include "nanoinfer/tensor/tensor.h"
 
@@ -45,7 +45,9 @@ TEST_F(EmbeddingKernelTest, BasicLookup) {
                cudaMemcpyHostToDevice);
 
     // 5. Run Kernel
-    kernel::embedding_kernel_cu(d_input, d_weight, d_output, vocab_size, nullptr);
+    auto emb_cu = kernel::KernelRegistry::instance().get<kernel::EmbeddingKernelFn>(
+        "embedding", base::DeviceType::kDeviceCUDA);
+    emb_cu(d_input, d_weight, d_output, vocab_size, nullptr);
 
     // 6. Check Result
     std::vector<float> h_output(token_num * dim);
@@ -97,10 +99,14 @@ TEST_F(EmbeddingKernelTest, CompareCpuWithGpu) {
                cudaMemcpyHostToDevice);
 
     // 4. Run CPU Kernel
-    kernel::embedding_kernel_cpu(t_in_cpu, t_wei_cpu, t_out_cpu, vocab_size, nullptr);
+    auto emb_cpu = kernel::KernelRegistry::instance().get<kernel::EmbeddingKernelFn>(
+        "embedding", base::DeviceType::kDeviceCPU);
+    emb_cpu(t_in_cpu, t_wei_cpu, t_out_cpu, vocab_size, nullptr);
 
     // 5. Run GPU Kernel
-    kernel::embedding_kernel_cu(t_in_gpu, t_wei_gpu, t_out_gpu, vocab_size, nullptr);
+    auto emb_cu = kernel::KernelRegistry::instance().get<kernel::EmbeddingKernelFn>(
+        "embedding", base::DeviceType::kDeviceCUDA);
+    emb_cu(t_in_gpu, t_wei_gpu, t_out_gpu, vocab_size, nullptr);
     cudaDeviceSynchronize();
 
     // 6. 对比结果

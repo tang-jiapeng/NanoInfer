@@ -3,8 +3,8 @@
 #include <cmath>
 #include <random>
 #include <vector>
-#include "../src/op/kernels/cpu/swiglu_kernel.h"
-#include "../src/op/kernels/cuda/swiglu_kernel.cuh"
+#include "../src/op/kernels/kernel_registry.h"
+#include "../src/op/kernels/kernel_types.h"
 #include "nanoinfer/base/base.h"
 #include "nanoinfer/tensor/tensor.h"
 
@@ -54,10 +54,14 @@ TEST_F(SwiGLUKernelTest, CompareCpuWithGpu) {
     cudaMemcpy(gpu_in2.ptr<void>(), h_in2.data(), size * sizeof(float), cudaMemcpyHostToDevice);
 
     // 4. Run CPU
-    kernel::swiglu_kernel_cpu(cpu_in1, cpu_in2, cpu_out, nullptr);
+    auto swiglu_cpu = kernel::KernelRegistry::instance().get<kernel::SwigluKernelFn>(
+        "swiglu", base::DeviceType::kDeviceCPU);
+    swiglu_cpu(cpu_in1, cpu_in2, cpu_out, nullptr);
 
     // 5. Run GPU
-    kernel::swiglu_kernel_cu(gpu_in1, gpu_in2, gpu_out, nullptr);
+    auto swiglu_cu = kernel::KernelRegistry::instance().get<kernel::SwigluKernelFn>(
+        "swiglu", base::DeviceType::kDeviceCUDA);
+    swiglu_cu(gpu_in1, gpu_in2, gpu_out, nullptr);
     cudaDeviceSynchronize();
 
     // 6. Compare

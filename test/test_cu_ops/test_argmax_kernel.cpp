@@ -2,11 +2,10 @@
 #include <gtest/gtest.h>
 #include <random>
 #include <vector>
+#include "../src/op/kernels/kernel_registry.h"
+#include "../src/op/kernels/kernel_types.h"
 #include "nanoinfer/base/base.h"
 #include "nanoinfer/tensor/tensor.h"
-#include "../src/op/kernels/cpu/argmax_kernel.h"
-#include "../src/op/kernels/cuda/argmax_kernel.cuh"
-
 
 class ArgmaxTest : public ::testing::Test {
    protected:
@@ -17,7 +16,6 @@ class ArgmaxTest : public ::testing::Test {
 };
 
 TEST_F(ArgmaxTest, BatchedArgmax) {
-
     int32_t batch_size = 4;
     int32_t vocab_size = 10000;  // 模拟较真实的 Vocab Size
 
@@ -53,7 +51,9 @@ TEST_F(ArgmaxTest, BatchedArgmax) {
     cudaMemcpy(t_in.ptr<void>(), h_input.data(), h_input.size() * 4, cudaMemcpyHostToDevice);
 
     // 3. Run Kernel
-    kernel::argmax_kernel_cu(t_in, t_out, nullptr);
+    auto argmax_cu = kernel::KernelRegistry::instance().get<kernel::ArgmaxKernelFn>(
+        "argmax", base::DeviceType::kDeviceCUDA);
+    argmax_cu(t_in, t_out, nullptr);
     cudaDeviceSynchronize();
 
     // 4. Verify

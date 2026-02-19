@@ -2,8 +2,8 @@
 #include <gtest/gtest.h>
 #include <cmath>
 #include <vector>
-#include "../src/op/kernels/cpu/rope_kernel.h"
-#include "../src/op/kernels/cuda/rope_kernel.cuh"
+#include "../src/op/kernels/kernel_registry.h"
+#include "../src/op/kernels/kernel_types.h"
 #include "nanoinfer/base/base.h"
 #include "nanoinfer/tensor/tensor.h"
 
@@ -80,12 +80,14 @@ TEST_F(RoPEKernelTest, CompareCpuWithGpu) {
                cudaMemcpyHostToDevice);
 
     // 4. Run CPU
-    kernel::rope_kernel_cpu(dim, kv_dim, head_size, cpu_q, cpu_k, cpu_pos, cpu_sin, cpu_cos,
-                            nullptr);
+    auto rope_cpu = kernel::KernelRegistry::instance().get<kernel::RoPEKernelFn>(
+        "rope", base::DeviceType::kDeviceCPU);
+    rope_cpu(dim, kv_dim, head_size, cpu_q, cpu_k, cpu_pos, cpu_sin, cpu_cos, nullptr);
 
     // 5. Run GPU
-    kernel::rope_kernel_cu(dim, kv_dim, head_size, gpu_q, gpu_k, gpu_pos, gpu_sin, gpu_cos,
-                           nullptr);
+    auto rope_cu = kernel::KernelRegistry::instance().get<kernel::RoPEKernelFn>(
+        "rope", base::DeviceType::kDeviceCUDA);
+    rope_cu(dim, kv_dim, head_size, gpu_q, gpu_k, gpu_pos, gpu_sin, gpu_cos, nullptr);
     cudaDeviceSynchronize();
 
     // 6. 验证结果
@@ -126,7 +128,9 @@ TEST_F(RoPEKernelTest, SinCosCacheGeneration) {
     tensor::Tensor t_cos(base::DataType::kDataTypeFp32, max_seq_len, head_size, true, gpu_alloc_);
 
     // 2. 运行 GPU Kernel (生成表)
-    kernel::sin_cos_cache_calc_cu(head_size, max_seq_len, t_sin, t_cos, nullptr);
+    auto sincos_cu = kernel::KernelRegistry::instance().get<kernel::SinCosCacheCalcKernelFn>(
+        "sin_cos_cache_calc", base::DeviceType::kDeviceCUDA);
+    sincos_cu(head_size, max_seq_len, t_sin, t_cos, nullptr);
     cudaDeviceSynchronize();
 
     // 3. 拷贝回 CPU
