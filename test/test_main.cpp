@@ -37,6 +37,10 @@ static const std::unordered_map<std::string, std::string> kModuleFilterMap = {
     {"engine",
      "EngineTest.*:BlockManagerTest.*:BlockTableTest.*"
      ":KVCacheManagerTest.*:SchedulerTest.*"},
+    // Layer 测试 (op/)
+    {"layer",
+     "LayerBaseTest.*:VecAddLayerTest.*:RmsNormLayerTest.*"
+     ":MatmulLayerTest.*:SwiGLULayerTest.*:EmbeddingLayerTest.*"},
     // Model 测试
     {"model", "TinyLlamaTest.*"},
     // 快捷组合
@@ -146,7 +150,8 @@ int main(int argc, char* argv[]) {
                 ":RoPEKernelTest.*:SwigluKernelTest.*"
                 ":EngineTest.*:BlockManagerTest.*:BlockTableTest.*"
                 ":KVCacheManagerTest.*:SchedulerTest.*"
-                ":TinyLlamaTest.*";
+                ":LayerBaseTest.*:VecAddLayerTest.*:RmsNormLayerTest.*"
+                ":MatmulLayerTest.*:SwiGLULayerTest.*:EmbeddingLayerTest.*";
             LOG(INFO) << "No --module specified. Running default suite.";
             testing::GTEST_FLAG(filter) = default_filter;
         }
