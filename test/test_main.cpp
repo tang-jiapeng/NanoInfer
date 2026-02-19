@@ -16,7 +16,7 @@
 //   ./test_llm                         运行全部测试
 //   ./test_llm --module=tensor         只运行 Tensor 相关测试
 //   ./test_llm --module=tensor,buffer  运行 Tensor + Buffer 测试
-//   ./test_llm --module=cu_ops         运行所有 CUDA Kernel 测试
+//   ./test_llm --module=cuda_kernel    运行所有 CUDA Kernel 测试
 //   ./test_llm --module=engine         运行 Engine 测试
 //   ./test_llm --module=model          运行 Model 加载测试
 //   ./test_llm --list-modules          列出所有可用模块名
@@ -28,7 +28,7 @@ static const std::unordered_map<std::string, std::string> kModuleFilterMap = {
     {"buffer", "BufferTest.*"},
     {"tensor", "TensorTest.*"},
     // CUDA Kernel 测试
-    {"cu_ops",
+    {"cuda_kernel",
      "AddKernelTest.*:ArgmaxKernelTest.*:EmbeddingKernelTest.*"
      ":MatmulKernelTest.*:PagedAttentionKernelTest.*"
      ":PagedKVWriteKernelTest.*:RMSNormKernelTest.*"
@@ -118,7 +118,7 @@ int main(int argc, char* argv[]) {
                   << "  ./test_llm --module=fast           # base + alloc + buffer + tensor\n"
                   << "  ./test_llm --module=tensor,buffer  # TensorTest + BufferTest\n"
                   << "  ./test_llm --module=engine         # EngineTest + Scheduler + ...\n"
-                  << "  ./test_llm --module=cu_ops         # all CUDA kernel tests\n";
+                  << "  ./test_llm --module=cuda_kernel    # all CUDA kernel tests\n";
         return 0;
     }
 
@@ -151,7 +151,8 @@ int main(int argc, char* argv[]) {
                 ":EngineTest.*:BlockManagerTest.*:BlockTableTest.*"
                 ":KVCacheManagerTest.*:SchedulerTest.*"
                 ":LayerBaseTest.*:VecAddLayerTest.*:RmsNormLayerTest.*"
-                ":MatmulLayerTest.*:SwiGLULayerTest.*:EmbeddingLayerTest.*";
+                ":MatmulLayerTest.*:SwiGLULayerTest.*:EmbeddingLayerTest.*"
+                ":TinyLlamaTest.*";
             LOG(INFO) << "No --module specified. Running default suite.";
             testing::GTEST_FLAG(filter) = default_filter;
         }
