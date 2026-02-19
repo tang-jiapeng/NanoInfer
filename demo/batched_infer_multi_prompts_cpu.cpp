@@ -16,14 +16,14 @@ const std::string MODEL_PATH = "./models/llama2/llama2_fp32.bin";
 const std::string TOKEN_PATH = "./models/llama2/tokenizer.model";
 
 // Engine 参数
-const int32_t MAX_BATCH_SIZE = 8;        // 最大并发 Batch (decode 阶段的序列数)
-const int32_t MAX_SEQUENCES = 16;        // 系统最大并发序列数
-const int32_t PREFILL_CHUNK_SIZE = 512;  // Prefill 每步处理的最大 token 数 (并行 prefill)
-const int32_t BLOCK_SIZE = 16;           // PagedAttention Block 大小 (须与 kernel 配置一致)
-const int32_t NUM_CACHE_BLOCKS = 1024;   // 显存池 Block 总数
+const int32_t MAX_BATCH_SIZE = 4;
+const int32_t MAX_SEQUENCES = 8;
+const int32_t PREFILL_CHUNK_SIZE = 256;
+const int32_t BLOCK_SIZE = 16;
+const int32_t NUM_CACHE_BLOCKS = 512;
 
 // 生成参数
-const int32_t MAX_NEW_TOKENS = 64;  // 每个请求最多生成的 Token 数
+const int32_t MAX_NEW_TOKENS = 64;
 
 // ----------------------------------------------------------------------------------
 // Per-Request 性能追踪
@@ -34,7 +34,7 @@ struct RequestPerfTracker {
 
     // Prefill 阶段计时
     double prefill_time_ms = 0.0;
-    int32_t prefill_steps = 0;
+    int32_t prefill_steps = 0;  // prefill 消耗的 step 数 (chunked prefill 可能 >1)
 
     // Decode 阶段计时
     double decode_time_ms = 0.0;
@@ -44,7 +44,7 @@ struct RequestPerfTracker {
     double ttft_ms = 0.0;
 
     // 状态追踪
-    bool was_prefill = true;
+    bool was_prefill = true;  // 上一步是否在 prefill
     std::chrono::high_resolution_clock::time_point phase_start;
 
     void start_phase() {
@@ -83,25 +83,25 @@ static void print_step_info(int step, const engine::Scheduler::Stats& stats) {
 int main(int argc, char** argv) {
     google::InitGoogleLogging(argv[0]);
     FLAGS_logtostderr = true;
-    FLAGS_v = 0;  // 减少 VLOG 噪音，调试时可改为 1 或 2
+    FLAGS_v = 0;
 
     // ==================================================================
-    // 1. 加载模型
+    // 1. 加载模型 (CPU 模式)
     // ==================================================================
     auto t_load_start = std::chrono::high_resolution_clock::now();
     LOG(INFO) << "Loading model from: " << MODEL_PATH;
     auto model = std::make_unique<model::LLamaModel>(base::TokenizerType::kEncodeSpe, TOKEN_PATH,
                                                      MODEL_PATH, false);
-    model->init(base::DeviceType::kDeviceCUDA);
+    model->init(base::DeviceType::kDeviceCPU);
     auto t_load_end = std::chrono::high_resolution_clock::now();
     double load_time_ms =
         std::chrono::duration<double, std::milli>(t_load_end - t_load_start).count();
 
-    LOG(INFO) << "Model loaded. Vocab=" << model->config().vocab_size_
+    LOG(INFO) << "Model loaded (CPU). Vocab=" << model->config().vocab_size_
               << ", Layers=" << model->config().layer_num_ << ", Dim=" << model->config().dim_;
 
     // ==================================================================
-    // 2. 准备多条 Prompt (不同长度，用于展示 Continuous Batching)
+    // 2. 准备 Prompt
     // ==================================================================
     struct PromptEntry {
         std::string text;
@@ -111,14 +111,12 @@ int main(int argc, char** argv) {
     std::vector<PromptEntry> prompts = {
         {"Once upon a time, there was a little girl named Lily who lived in a small village.",
          MAX_NEW_TOKENS},
-        {"The meaning of life is", MAX_NEW_TOKENS},
-        {"In a galaxy far far away, there was a powerful wizard who could", MAX_NEW_TOKENS},
         {"The quick brown fox jumps over the lazy dog. This sentence is famous because",
          MAX_NEW_TOKENS},
     };
 
     // ==================================================================
-    // 3. 创建并初始化 Engine
+    // 3. 创建并初始化 Engine (使用 CPU 分配器)
     // ==================================================================
     engine::EngineConfig engine_config;
     engine_config.max_batch_size = MAX_BATCH_SIZE;
@@ -128,12 +126,12 @@ int main(int argc, char** argv) {
     engine_config.num_cache_blocks = NUM_CACHE_BLOCKS;
 
     engine::Engine eng(model.get(), engine_config);
-    auto allocator = base::CUDADeviceAllocatorFactory::get_instance();
+    auto allocator = base::CPUDeviceAllocatorFactory::get_instance();
 
     auto status = eng.init(allocator);
     CHECK(status) << "Engine init failed: " << status.get_err_msg();
 
-    LOG(INFO) << "Engine initialized. Max Batch=" << MAX_BATCH_SIZE
+    LOG(INFO) << "Engine initialized (CPU). Max Batch=" << MAX_BATCH_SIZE
               << ", Blocks=" << NUM_CACHE_BLOCKS << ", Chunk=" << PREFILL_CHUNK_SIZE;
 
     // ==================================================================
@@ -147,7 +145,7 @@ int main(int argc, char** argv) {
 
     std::cout << "\n";
     print_separator();
-    std::cout << "  Batched Inference - Multi-Prompt Demo (Continuous Batching)" << std::endl;
+    std::cout << "  CPU Inference Demo (Continuous Batching)" << std::endl;
     print_separator();
     std::cout << "\n--- Submitting " << prompts.size() << " Prompts ---\n" << std::endl;
 
@@ -170,9 +168,9 @@ int main(int argc, char** argv) {
     }
 
     // ==================================================================
-    // 5. 逐步执行并展示调度过程
+    // 5. 逐步执行 (带 per-step 性能追踪)
     // ==================================================================
-    std::cout << "\n--- Running Inference (step-by-step) ---\n" << std::endl;
+    std::cout << "\n--- Running Inference (CPU, step-by-step) ---\n" << std::endl;
 
     auto t_start = std::chrono::high_resolution_clock::now();
     int step_count = 0;
@@ -188,8 +186,10 @@ int main(int argc, char** argv) {
             }
         }
 
+        auto t_step_start = std::chrono::high_resolution_clock::now();
         status = eng.step();
         CHECK(status) << "Step " << step_count << " failed: " << status.get_err_msg();
+        auto t_step_end = std::chrono::high_resolution_clock::now();
 
         step_count++;
 
@@ -198,7 +198,7 @@ int main(int argc, char** argv) {
             auto& tracker = perf_trackers[rid];
             if (was_prefill) {
                 tracker.end_prefill_step();
-                // 检测 prefill → decode 转换 (TTFT)
+                // 检测是否刚完成 prefill → decode 转换 (TTFT)
                 auto req = eng.get_request(rid);
                 if (req && !req->is_prefill() && tracker.was_prefill) {
                     tracker.ttft_ms = tracker.prefill_time_ms;
@@ -209,7 +209,6 @@ int main(int argc, char** argv) {
             }
         }
 
-        // 每 10 步打印一次调度状态
         if (step_count % 10 == 0 || !eng.has_work()) {
             auto stats = eng.get_scheduler_stats();
             print_step_info(step_count, stats);
@@ -220,7 +219,7 @@ int main(int argc, char** argv) {
     double elapsed_s = std::chrono::duration<double>(t_end - t_start).count();
     double elapsed_ms = elapsed_s * 1000.0;
 
-    std::cout << std::endl;  // 换行 (print_step_info 用了 \r)
+    std::cout << std::endl;
     std::cout << "\nInference complete in " << step_count << " steps.\n" << std::endl;
 
     // ==================================================================
@@ -259,7 +258,7 @@ int main(int argc, char** argv) {
     // ==================================================================
     std::cout << std::endl;
     print_separator();
-    std::cout << "  Detailed Performance Report (CUDA)" << std::endl;
+    std::cout << "  Detailed Performance Report (CPU)" << std::endl;
     print_separator();
     std::cout << std::fixed << std::setprecision(2);
 
@@ -334,8 +333,11 @@ int main(int argc, char** argv) {
                   << (total_decode_ms / total_compute_ms * 100.0) << "%)" << std::endl;
     }
 
-    // Avg decode token latency
+    // Avg decode token latency (across all requests)
     if (total_generated_tokens > 0) {
+        // 注意: batched decode 时 wall-clock decode 时间 < sum of per-request decode 时间
+        // 用 wall-clock 减去 prefill wall-clock 来估算真实 batched decode 时间
+        // 但由于 prefill 和 decode 交错执行, 这里用 sum/total 作为 per-request 指标
         double avg_decode_lat = total_decode_ms / total_generated_tokens;
         std::cout << "    Avg Decode Latency:     " << avg_decode_lat
                   << " ms/tok  (per-request sum)" << std::endl;
