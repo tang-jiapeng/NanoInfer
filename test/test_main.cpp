@@ -145,9 +145,9 @@ int main(int argc, char* argv[]) {
                 ":PagedKVWriteKernelTest.*:RMSNormKernelTest.*"
                 ":RoPEKernelTest.*:SwigluKernelTest.*"
                 ":EngineTest.*:BlockManagerTest.*:BlockTableTest.*"
-                ":KVCacheManagerTest.*:SchedulerTest.*";
-            LOG(INFO) << "No --module specified. Running default suite (excluding TinyLlamaTest).";
-            LOG(INFO) << "To run model tests: ./test_llm --module=model";
+                ":KVCacheManagerTest.*:SchedulerTest.*"
+                ":TinyLlamaTest.*";
+            LOG(INFO) << "No --module specified. Running default suite.";
             testing::GTEST_FLAG(filter) = default_filter;
         }
     }
