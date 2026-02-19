@@ -1,3 +1,10 @@
+/**
+ * @file add.cpp
+ * @brief 向量加法层实现（VecAddLayer）
+ *
+ * 计算：Output = Input1 + Input2（逐元素）
+ * 通过 KernelRegistry 分发 "add" 算子到 CPU/CUDA 后端。
+ */
 #include "nanoinfer/op/add.h"
 #include "kernels/kernel_registry.h"
 #include "kernels/kernel_types.h"
@@ -9,6 +16,7 @@ VecAddLayer::VecAddLayer(base::DeviceType device_type)
     reset_output_size(1);
 }
 
+/** @brief 输入校验：检查两个输入和输出的空/设备/类型/形状一致性 */
 base::Status VecAddLayer::check() const {
     const auto& input1 = get_input(0);
     const auto& input2 = get_input(1);
@@ -45,6 +53,7 @@ base::Status VecAddLayer::check() const {
     return base::error::Success();
 }
 
+/** @brief 前向计算：校验后分发 "add" 算子到 CPU/CUDA 后端 */
 base::Status VecAddLayer::forward() {
     auto status = this->check();
     if (!status) {

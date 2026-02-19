@@ -1,3 +1,32 @@
+/**
+ * @file engine.cpp
+ * @brief 推理引擎实现（请求调度 + 前向执行 + 采样）
+ *
+ * Engine 是 NanoInfer 的最顶层编排器，负责：
+ *   1. 接收用户请求（add_request）：编码 prompt → 分配 KV Cache → 加入 Scheduler
+ *   2. 单步执行（step）：Scheduler 调度 → execute_batch → 采样 → 更新状态
+ *   3. 持续运行（run）：循环调用 step() 直到所有请求完成
+ *
+ * 执行流程（每个 step）：
+ *
+ *   schedule_next_batch()
+ *         │
+ *    ┌────┴────┐
+ *    │ split   │  按请求状态拆分为 Prefill 和 Decode 两组
+ *    └────┬────┘
+ *         │
+ *    ┌────┴────────────────────────┐
+ *    │ Phase 1: Chunked Prefill    │  逐请求处理，每请求最多 chunk_size tokens
+ *    │  execute_prefill_single()   │  最后一个 chunk 完成时采样首个生成 token
+ *    └────┬────────────────────────┘
+ *         │
+ *    ┌────┴────────────────────────┐
+ *    │ Phase 2: Batched Decode     │  所有 Decode 请求合并为一个 batch
+ *    │  execute_decode_batch()     │  每请求生成 1 个 token
+ *    └────┬────────────────────────┘
+ *         │
+ *    update_after_step()           清理已完成的请求
+ */
 #include "nanoinfer/engine/engine.h"
 #include <cstring>
 
@@ -13,6 +42,16 @@ Engine::~Engine() {
     stop();
 }
 
+/**
+ * @brief 初始化引擎
+ *
+ * 按顺序完成：
+ *   1. 创建 Scheduler（管理请求队列 + Prefill/Decode 调度）
+ *   2. 创建 KVCacheManager 并分配物理显存（Paged KV Cache 块池）
+ *   3. 将 KV Cache 的每层 Tensor 注入 Model（Model 持有引用）
+ *   4. 创建 ArgmaxSampler
+ *   5. 预分配 block_table / sampled_ids 的 Device Tensor（避免运行时反复分配）
+ */
 base::Status Engine::init(std::shared_ptr<base::DeviceAllocator> allocator) {
     if (initialized_) {
         return base::error::InvalidArgument("Engine is already initialized");
@@ -70,6 +109,12 @@ base::Status Engine::init(std::shared_ptr<base::DeviceAllocator> allocator) {
     return base::error::Success();
 }
 
+/**
+ * @brief 提交一个推理请求
+ *
+ * 流程: 编码 prompt → 添加 BOS token → 为整个 prompt 预分配 KV Cache blocks → 加入 Scheduler
+ * 返回 request_id（用于后续查询结果）
+ */
 int64_t Engine::add_request(const std::string& prompt, int32_t max_new_tokens) {
     if (!initialized_) {
         LOG(ERROR) << "Engine not initialized. Call init() before adding requests.";
@@ -106,6 +151,7 @@ int64_t Engine::add_request(const std::string& prompt, int32_t max_new_tokens) {
     return request_id;
 }
 
+/// @brief 单步执行：调度一个 batch → 执行 Prefill/Decode → 采样 → 更新状态
 base::Status Engine::step() {
     if (!initialized_) {
         return base::error::InternalError("Engine not initialized");
@@ -118,6 +164,7 @@ base::Status Engine::step() {
     return execute_batch(batch);
 }
 
+/// @brief 持续运行：循环调用 step() 直到所有请求处理完毕
 base::Status Engine::run() {
     while (running_ && has_work()) {
         base::Status status = step();
@@ -133,6 +180,14 @@ void Engine::stop() {
     running_ = false;
 }
 
+/**
+ * @brief 执行一个调度 batch（核心编排函数）
+ *
+ * 将 batch 中的请求拆分为 Prefill / Decode 两组，分别处理：
+ *   Phase 1: Prefill 请求逐个执行 Chunked Prefill（每请求最多 chunk_size tokens）
+ *   Phase 2: Decode 请求合并为一个批次执行（每请求 1 token）
+ *   Phase 3: 通知 Scheduler 清理已完成的请求
+ */
 base::Status Engine::execute_batch(const ScheduledBatch& batch) {
     // ======================================================================
     // 拆分: Prefill 请求 vs Decode 请求
@@ -170,25 +225,39 @@ base::Status Engine::execute_batch(const ScheduledBatch& batch) {
     return base::error::Success();
 }
 
+/**
+ * @brief 执行单个请求的 Chunked Prefill
+ *
+ * 每次调用只处理一个 chunk（最多 prefill_chunk_size 个 tokens），不处理完整 prompt。
+ * 这允许长 prompt 的处理被分散到多个 step() 中，与 Decode 请求交替执行。
+ *
+ * 关键逻辑：
+ *   1. 从请求中获取下一个 chunk 的 tokens 和 positions
+ *   2. 构建 ForwardBatch（is_prefill=true, batch_size=1）
+ *   3. 调用 model->forward_batched() 得到 logits [chunk_len, vocab_size]
+ *   4. 仅当整个 prompt 的 prefill 完成后（prefill_remaining == 0），
+ *      取最后一个 token 的 logits 做 argmax 采样，生成首个 token
+ *   5. 未完成时不采样，下一轮 step() 会继续调度该请求
+ *
+ * 注意: KV Cache blocks 在 add_request() 时已为整个 prompt 预分配，
+ *       此处不需要 extend_sequence。
+ */
 base::Status Engine::execute_prefill_single(const InferenceRequestPtr& req,
                                             std::vector<int64_t>& finished_ids) {
     int32_t request_id = static_cast<int32_t>(req->request_id());
 
-    // ========  Chunked Prefill (vLLM 风格)  ========
-    // 每次调用只处理一个 chunk（最多 prefill_chunk_size 个 tokens）
-    // Engine::step() 每轮调度 → 未完成的 prefill 请求会在下一轮继续
-    // 最后一个 chunk 处理完后再采样第一个 generated token
+    // ========  Chunked Prefill  ========
+    // 获取本 chunk 的 tokens 和对应的绝对位置
     int32_t remaining = req->prefill_remaining();
     int32_t chunk_len = std::min(remaining, config_.prefill_chunk_size);
     std::vector<int32_t> tokens = req->get_next_chunk_tokens(chunk_len);
     std::vector<int32_t> positions = req->get_next_chunk_positions(chunk_len);
-    chunk_len = static_cast<int32_t>(tokens.size());  // 以实际返回为准
+    chunk_len = static_cast<int32_t>(tokens.size());
 
-    // 注意: allocate_sequence 已在 add_request 中为整个 prompt 分配了足够的 blocks
-    //       此处 **不需要** extend_sequence (那会导致多余的 block 分配)
+    // KV blocks 已在 add_request 中预分配，此处无需 extend
 
-    // 构建 ForwardBatch (单序列, prefill 模式)
-    // context_len = 已完成 tokens + 本 chunk tokens = 本 chunk 结束后的总上下文长度
+    // 构建 ForwardBatch
+    // context_len = 已处理 tokens + 本 chunk = 截止本 chunk 结束后的总长度
     int32_t computed = req->num_computed_tokens();
     int32_t context_len = computed + chunk_len;
 
@@ -223,9 +292,9 @@ base::Status Engine::execute_prefill_single(const InferenceRequestPtr& req,
     // 更新已计算 token 数
     req->add_computed_tokens(chunk_len);
 
-    // ==== 仅当 prefill 全部完成后才采样 ====
+    // ==== Prefill 完成后采样首个生成 token ====
     if (req->prefill_remaining() == 0) {
-        // 取最后一个 token 的 logits 做 argmax 采样
+        // 取最后一个 token 的 logits（即 chunk 的最后一行）做 argmax
         tensor::Tensor last_logits(base::DataType::kDataTypeFp32, 1, vocab_size, true, allocator_);
         int64_t last_offset = static_cast<int64_t>(chunk_len - 1) * vocab_size;
         if (device_type_ == base::DeviceType::kDeviceCUDA) {
@@ -248,6 +317,7 @@ base::Status Engine::execute_prefill_single(const InferenceRequestPtr& req,
             std::memcpy(&next_token, sampled_id.ptr<void>(), sizeof(int32_t));
         }
 
+        // 采样后检查 EOS / max_tokens，决定是否继续生成
         int32_t eos_id = model_->config().eos_token_id_;
         bool continue_gen = req->add_token(next_token, eos_id);
         if (!continue_gen) {
@@ -255,17 +325,29 @@ base::Status Engine::execute_prefill_single(const InferenceRequestPtr& req,
             kv_cache_manager_->free_sequence(request_id);
         }
     }
-    // 否则: 非最后一轮 chunk, 不采样, 下一轮 step() 会继续处理该请求
+    // else: 本轮 chunk 未完成整个 prompt，不采样，下一轮继续
 
     return base::error::Success();
 }
 
+/**
+ * @brief 批量执行 Decode（所有 Decode 请求合并为一个 batch）
+ *
+ * 每个请求处理 1 个 token（上一步生成的 token），流程：
+ *   1. 为每个请求 extend_sequence(+1) — 分配新 token 的 KV Cache 槽位
+ *   2. 构建 ForwardBatch（is_prefill=false, batch_size=N）
+ *   3. 合并所有请求的 block_table → 单个 Tensor [batch_size, max_blocks]
+ *   4. model->forward_batched() → logits [batch_size, vocab_size]
+ *   5. Batch Argmax 采样 → next_tokens [batch_size]
+ *   6. D2H 拷贝 → 更新每个请求的状态（add_token, 检查 EOS）
+ *   7. 完成的请求释放 KV Cache 并加入 finished_ids
+ */
 base::Status Engine::execute_decode_batch(const std::vector<InferenceRequestPtr>& reqs,
                                           std::vector<int64_t>& finished_ids) {
     int32_t batch_size = static_cast<int32_t>(reqs.size());
     int32_t vocab_size = model_->config().vocab_size_;
 
-    // 构建 ForwardBatch (decode 模式: 每个请求 1 个 token)
+    // 构建 ForwardBatch: Decode 模式（每请求仅 1 个 token）
     model::ForwardBatch fwd_batch;
     fwd_batch.batch_size = batch_size;
     fwd_batch.is_prefill = false;
@@ -280,14 +362,14 @@ base::Status Engine::execute_decode_batch(const std::vector<InferenceRequestPtr>
         int32_t request_id = static_cast<int32_t>(req->request_id());
         request_ids_vec.push_back(request_id);
 
-        // Decode: 每次 1 个 token
+        // Decode 每步 1 个 token
         std::vector<int32_t> tokens = req->get_next_chunk_tokens(1);
         std::vector<int32_t> positions = req->get_next_chunk_positions(1);
 
         fwd_batch.token_ids.insert(fwd_batch.token_ids.end(), tokens.begin(), tokens.end());
         fwd_batch.positions.insert(fwd_batch.positions.end(), positions.begin(), positions.end());
 
-        // 扩展 KV Cache (decode 每次 +1)
+        // extend_sequence(+1): 为新 token 分配 KV Cache 槽位（可能触发新 block 分配）
         auto status = kv_cache_manager_->extend_sequence(request_id, 1);
         if (!status) return status;
 
@@ -310,16 +392,16 @@ base::Status Engine::execute_decode_batch(const std::vector<InferenceRequestPtr>
         fwd_batch.block_table = block_table_cpu;
     }
 
-    // Forward (输出 [batch_size, vocab_size], 因为 decode 每请求 1 token)
+    // Forward: logits [batch_size, vocab_size]（Decode 时 total_tokens == batch_size）
     tensor::Tensor logits(base::DataType::kDataTypeFp32, batch_size, vocab_size, true, allocator_);
     status = model_->forward_batched(fwd_batch, logits);
     if (!status) return status;
 
-    // Batch Argmax — logits 已经是 [batch_size, vocab_size], 直接采样
+    // Batch Argmax 采样
     tensor::Tensor sampled_ids_dev(base::DataType::kDataTypeInt32, batch_size, true, allocator_);
     sampler_->sample_batched(logits, sampled_ids_dev);
 
-    // D2H
+    // D2H: 将采样结果拷回 Host
     std::vector<int32_t> next_tokens(batch_size);
     if (device_type_ == base::DeviceType::kDeviceCUDA) {
         cudaMemcpy(next_tokens.data(), sampled_ids_dev.ptr<void>(), batch_size * sizeof(int32_t),
@@ -328,7 +410,7 @@ base::Status Engine::execute_decode_batch(const std::vector<InferenceRequestPtr>
         std::memcpy(next_tokens.data(), sampled_ids_dev.ptr<void>(), batch_size * sizeof(int32_t));
     }
 
-    // 更新 Request 状态
+    // 更新每个请求的状态: 记录 computed_tokens, 检查 EOS / max_tokens
     int32_t eos_id = model_->config().eos_token_id_;
     for (int i = 0; i < batch_size; ++i) {
         auto& req = reqs[i];
@@ -343,6 +425,7 @@ base::Status Engine::execute_decode_batch(const std::vector<InferenceRequestPtr>
     return base::error::Success();
 }
 
+/// @brief 获取指定请求的生成结果（decode tokens → 文本）
 std::string Engine::get_request_result(int64_t request_id) {
     auto req = get_request(request_id);
     if (!req) return "";

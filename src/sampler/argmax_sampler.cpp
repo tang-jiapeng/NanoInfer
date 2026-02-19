@@ -1,9 +1,19 @@
+/**
+ * @file argmax_sampler.cpp
+ * @brief Argmax 贪心采样器实现
+ *
+ * ArgmaxSampler 基于 Greedy Search 策略，从 Logits 中选取最大值对应的 Token ID：
+ *   - sample()（已弃用）：仅支持 CPU 的单条采样，直接调用 std::max_element
+ *   - sample_batched()：支持 CPU/CUDA 的批量采样，通过 KernelRegistry 分发 "argmax" 算子
+ */
 #include "nanoinfer/sampler/argmax_sampler.h"
 #include "../op/kernels/kernel_registry.h"
 #include "../op/kernels/kernel_types.h"
 #include "nanoinfer/base/base.h"
 
 namespace sampler {
+
+/** @brief [已弃用] 单条 CPU 采样，返回 logits 中最大值的索引 */
 // 弃用
 size_t ArgmaxSampler::sample(const float* logits, size_t size, void* stream) {
     if (device_type_ == base::DeviceType::kDeviceCPU) {
@@ -16,6 +26,15 @@ size_t ArgmaxSampler::sample(const float* logits, size_t size, void* stream) {
     }
 }
 
+/**
+ * @brief 批量 Argmax 采样
+ *
+ * @param logits  输入 Logits [batch_size, vocab_size]
+ * @param output_ids 输出 Token IDs [batch_size]（需预分配，容量 ≥ batch_size）
+ * @param stream  CUDA 流（CPU 模式下忽略）
+ *
+ * 通过 KernelRegistry 获取 "argmax" 算子，自动区分 CPU/CUDA 后端。
+ */
 void ArgmaxSampler::sample_batched(const tensor::Tensor& logits, tensor::Tensor& output_ids,
                                    void* stream) {
     // 维度检查
@@ -29,7 +48,6 @@ void ArgmaxSampler::sample_batched(const tensor::Tensor& logits, tensor::Tensor&
         << "Output tensor size (" << output_ids.get_dim(0) << ") is smaller than batch size ("
         << batch_size << ")";
 
-    // 2. 获取算子 (CPU 或 CUDA 由 Factory 决定)
     auto argmax_kernel =
         kernel::KernelRegistry::instance().get<kernel::ArgmaxKernelFn>("argmax", device_type_);
 

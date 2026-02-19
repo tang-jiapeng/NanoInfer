@@ -1,3 +1,16 @@
+/**
+ * @file kernel_registry.h
+ * @brief 算子注册表（字符串名称 + 设备类型 → 函数指针）
+ *
+ * 核心设计：
+ *   - KernelRegistry：单例注册表，用 (name, DeviceType, type_index) 三元组作为 Key
+ *   - add<Fn>() / get<Fn>()：模板注册与查询，类型安全的函数指针存储
+ *   - REGISTER_KERNEL 宏：通过静态全局变量实现自动注册（加载即注册）
+ *
+ * 使用示例：
+ *   注册: REGISTER_KERNEL(add, kDeviceCPU, add_kernel_cpu)
+ *   查询: auto fn = KernelRegistry::instance().get<AddKernelFn>("add", kDeviceCPU);
+ */
 #ifndef NANO_INFER_KERNEL_REGISTEY_H
 #define NANO_INFER_KERNEL_REGISTEY_H
 

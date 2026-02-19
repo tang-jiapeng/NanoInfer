@@ -1,3 +1,17 @@
+/**
+ * @file layer.cpp
+ * @brief 算子层基类体系实现（BaseLayer → Layer → LayerParam）
+ *
+ * 三层继承架构：
+ *   - BaseLayer：设备类型 / 层类型 / 数据类型 / 名称等基本属性
+ *   - Layer：择入输入/输出 Tensor 向量 + 输入校验 + 多种 forward 重载
+ *   - LayerParam：增加权重（weights_）、量化缩放因子（scales_）、设备迁移
+ *
+ * 通用工具：
+ *   - check_tensor / check_tensor_with_dim：可变参数维度校验
+ *   - to_cuda()：将所有输入/输出/权重批量迁移到 GPU
+ *   - set_weight()：从原始指针构建 Tensor，支持 FP32 和 Int8 量化权重
+ */
 #include "nanoinfer/op/layer.h"
 #include <glog/logging.h>
 #include <nanoinfer/base/cuda_config.h>
@@ -6,8 +20,11 @@
 #include <utility>
 
 namespace op {
-BaseLayer::BaseLayer(base::DeviceType device_type, LayerType layer_type,
-                     base::DataType data_type, std::string layer_name)
+// -----------------------------------------------------------------------
+// BaseLayer: 算子层最底层基类，持有设备/层类型/数据类型等元信息
+// -----------------------------------------------------------------------
+BaseLayer::BaseLayer(base::DeviceType device_type, LayerType layer_type, base::DataType data_type,
+                     std::string layer_name)
     : device_type_(device_type),
       layer_type_(layer_type),
       data_type_(data_type),
@@ -46,9 +63,11 @@ void BaseLayer::set_device_type(base::DeviceType device_type) {
     device_type_ = device_type;
 }
 
+// -----------------------------------------------------------------------
+// Layer: 带输入/输出 Tensor 向量的算子层，提供输入校验和多种 forward 重载
+// -----------------------------------------------------------------------
 Layer::Layer(base::DeviceType device_type, LayerType layer_type, std::string layer_name)
-    : BaseLayer(device_type, layer_type, base::DataType::kDataTypeFp32,
-                std::move(layer_name)) {
+    : BaseLayer(device_type, layer_type, base::DataType::kDataTypeFp32, std::move(layer_name)) {
 }
 
 base::Status Layer::init() {
@@ -59,8 +78,7 @@ base::Status Layer::forward() {
     return base::error::FunctionNotImplement("");
 }
 
-base::Status Layer::check_tensor(const tensor::Tensor& tensor,
-                                 base::DeviceType device_type,
+base::Status Layer::check_tensor(const tensor::Tensor& tensor, base::DeviceType device_type,
                                  base::DataType data_type) const {
     if (tensor.is_empty()) {
         return base::error::InvalidArgument("The tensor parameter is empty.");
@@ -74,9 +92,15 @@ base::Status Layer::check_tensor(const tensor::Tensor& tensor,
     return base::error::Success();
 }
 
+/**
+ * @brief 校验 Tensor 的设备类型、数据类型和各维度尺寸
+ *
+ * 使用 C 可变参数 (va_args) 传入期望的各维度大小，
+ * 依次与 Tensor 的实际维度比对。
+ */
 base::Status Layer::check_tensor_with_dim(const tensor::Tensor& tensor,
-                                          base::DeviceType device_type,
-                                          base::DataType data_type, ...) const {
+                                          base::DeviceType device_type, base::DataType data_type,
+                                          ...) const {
     std::va_list args;
     if (tensor.is_empty()) {
         return base::error::InvalidArgument("The tensor parameter is empty.");
@@ -149,6 +173,7 @@ void Layer::reset_output_size(size_t size) {
     outputs_.resize(size);
 }
 
+/** @brief 将所有输入和输出 Tensor 迁移到 CUDA 设备 */
 void Layer::to_cuda() {
     for (auto& input : inputs_) {
         if (!input.is_empty()) {
@@ -181,10 +206,12 @@ size_t Layer::output_size() const {
     return outputs_.size();
 }
 
-LayerParam::LayerParam(base::DeviceType device_type, LayerType layer_type,
-                       bool is_quant_layer, std::string layer_name)
-    : Layer(device_type, layer_type, std::move(layer_name)),
-      is_quant_layer_(is_quant_layer) {
+// -----------------------------------------------------------------------
+// LayerParam: 带权重的算子层，支持 FP32 和 Int8 量化权重
+// -----------------------------------------------------------------------
+LayerParam::LayerParam(base::DeviceType device_type, LayerType layer_type, bool is_quant_layer,
+                       std::string layer_name)
+    : Layer(device_type, layer_type, std::move(layer_name)), is_quant_layer_(is_quant_layer) {
 }
 
 base::Status LayerParam::set_weight(int32_t idx, const tensor::Tensor& weight) {
@@ -204,132 +231,131 @@ const tensor::Tensor& LayerParam::get_weight(int32_t idx) const {
     return weights_.at(idx);
 }
 
+/** @brief 将所有输入/输出/权重/缩放因子迁移到 CUDA */
 void LayerParam::to_cuda() {
-    Layer::to_cuda();
-    for (auto& weight : weights_) {
-        weight.to_cuda(cuda_config_ ? cuda_config_->stream : nullptr);
-    }
-    if (!scales_.is_empty()) {
-        scales_.to_cuda(cuda_config_ ? cuda_config_->stream : nullptr);
-    }
-}
+    /**
+     * @brief 从原始指针构建权重 Tensor 并设置到 weights_ 槽位
+     *
+     * FP32 模式：直接包装为 float Tensor（external 模式，不拷贝数据）。
+     * Int8 量化模式：包装为 int8 Tensor，同时解析紧跟权重后的 Scale 数据
+     *   （按 group_size 分组，scale_nums = weight_size / group_size）。
+     */
+    base::Status LayerParam::set_weight(int32_t idx, const std::vector<int32_t>& dims,
+                                        const void* weight_ptr, base::DeviceType device_type) {
+        CHECK_GE(idx, 0);
+        CHECK_LT(idx, weights_.size());
+        CHECK_NE(weight_ptr, nullptr);
 
-base::Status LayerParam::set_weight(int32_t idx, const std::vector<int32_t>& dims,
-                                    const void* weight_ptr,
-                                    base::DeviceType device_type) {
-    CHECK_GE(idx, 0);
-    CHECK_LT(idx, weights_.size());
-    CHECK_NE(weight_ptr, nullptr);
+        size_t size = std::accumulate(dims.begin(), dims.end(), sizeof(float), std::multiplies<>());
+        std::shared_ptr<base::Buffer> buffer =
+            std::make_shared<base::Buffer>(size, nullptr, const_cast<void*>(weight_ptr), true);
+        if (device_type != base::DeviceType::kDeviceUnknown) {
+            buffer->set_device_type(device_type);
+        }
 
-    size_t size =
-        std::accumulate(dims.begin(), dims.end(), sizeof(float), std::multiplies<>());
-    std::shared_ptr<base::Buffer> buffer = std::make_shared<base::Buffer>(
-        size, nullptr, const_cast<void*>(weight_ptr), true);
-    if (device_type != base::DeviceType::kDeviceUnknown) {
-        buffer->set_device_type(device_type);
-    }
+        if (!is_quant_layer_) {
+            tensor::Tensor weight(base::DataType::kDataTypeFp32, dims);
+            weight.set_device_type(device_type);
+            CHECK(weight.assign(buffer));
+            weights_.at(idx) = weight;
+        } else {
+            // is quant layer
+            tensor::Tensor weight(base::DataType::kDataTypeInt8, dims);
+            weight.set_device_type(device_type);
+            CHECK(weight.assign(buffer));
+            weights_.at(idx) = weight;
 
-    if (!is_quant_layer_) {
-        tensor::Tensor weight(base::DataType::kDataTypeFp32, dims);
-        weight.set_device_type(device_type);
-        CHECK(weight.assign(buffer));
-        weights_.at(idx) = weight;
-    } else {
-        // is quant layer
-        tensor::Tensor weight(base::DataType::kDataTypeInt8, dims);
-        weight.set_device_type(device_type);
-        CHECK(weight.assign(buffer));
-        weights_.at(idx) = weight;
+            const int32_t weight_size = static_cast<int32_t>(weight.size());
+            CHECK(weight_size % group_size_ == 0);
 
-        const int32_t weight_size = static_cast<int32_t>(weight.size());
-        CHECK(weight_size % group_size_ == 0);
+            int32_t scale_nums = weight_size / group_size_;
+            scales_ = tensor::Tensor{base::DataType::kDataTypeFp32, scale_nums, false, nullptr,
+                                     reinterpret_cast<float*>((int8_t*)weight_ptr + weight_size)};
+            scales_.set_device_type(device_type);
+        }
 
-        int32_t scale_nums = weight_size / group_size_;
-        scales_ =
-            tensor::Tensor{base::DataType::kDataTypeFp32, scale_nums, false, nullptr,
-                           reinterpret_cast<float*>((int8_t*)weight_ptr + weight_size)};
-        scales_.set_device_type(device_type);
+        return base::error::Success();
     }
 
-    return base::error::Success();
-}
+    void LayerParam::set_scales(const tensor::Tensor& scales) {
+        CHECK(!scales.is_empty());
+        this->scales_ = scales;
+    }
 
-void LayerParam::set_scales(const tensor::Tensor& scales) {
-    CHECK(!scales.is_empty());
-    this->scales_ = scales;
-}
+    void LayerParam::set_group_size(int32_t group_size) {
+        this->group_size_ = group_size;
+    }
 
-void LayerParam::set_group_size(int32_t group_size) {
-    this->group_size_ = group_size;
-}
+    int32_t LayerParam::get_scale_num() const {
+        CHECK(!scales_.is_empty());
+        return static_cast<int32_t>(scales_.size());
+    }
 
-int32_t LayerParam::get_scale_num() const {
-    CHECK(!scales_.is_empty());
-    return static_cast<int32_t>(scales_.size());
-}
+    void LayerParam::reset_weight_size(size_t size) {
+        weights_.resize(size);
+    }
 
-void LayerParam::reset_weight_size(size_t size) {
-    weights_.resize(size);
-}
+    size_t LayerParam::weight_size() const {
+        return weights_.size();
+    }
 
-size_t LayerParam::weight_size() const {
-    return weights_.size();
-}
+    // -----------------------------------------------------------------------
+    // Layer::forward 多参数重载：便捷接口，自动 set_input/set_output 后调用 forward()
+    // -----------------------------------------------------------------------
+    base::Status Layer::forward(const tensor::Tensor& input1, const tensor::Tensor& output1) {
+        this->set_input(0, input1);
+        this->set_output(0, output1);
+        return this->forward();
+    }
 
-base::Status Layer::forward(const tensor::Tensor& input1, const tensor::Tensor& output1) {
-    this->set_input(0, input1);
-    this->set_output(0, output1);
-    return this->forward();
-}
+    base::Status Layer::forward(const tensor::Tensor& input1, const tensor::Tensor& input2,
+                                const tensor::Tensor& output1) {
+        this->set_input(0, input1);
+        this->set_input(1, input2);
 
-base::Status Layer::forward(const tensor::Tensor& input1, const tensor::Tensor& input2,
-                            const tensor::Tensor& output1) {
-    this->set_input(0, input1);
-    this->set_input(1, input2);
+        this->set_output(0, output1);
+        return this->forward();
+    }
 
-    this->set_output(0, output1);
-    return this->forward();
-}
+    base::Status Layer::forward(const tensor::Tensor& input1, const tensor::Tensor& input2,
+                                const tensor::Tensor& input3, const tensor::Tensor& output1) {
+        this->set_input(0, input1);
+        this->set_input(1, input2);
+        this->set_input(2, input3);
 
-base::Status Layer::forward(const tensor::Tensor& input1, const tensor::Tensor& input2,
-                            const tensor::Tensor& input3, const tensor::Tensor& output1) {
-    this->set_input(0, input1);
-    this->set_input(1, input2);
-    this->set_input(2, input3);
+        this->set_output(0, output1);
+        return this->forward();
+    }
 
-    this->set_output(0, output1);
-    return this->forward();
-}
+    base::Status Layer::forward(const tensor::Tensor& input1, const tensor::Tensor& input2,
+                                const tensor::Tensor& input3, const tensor::Tensor& input4,
+                                const tensor::Tensor& output1) {
+        this->set_input(0, input1);
+        this->set_input(1, input2);
+        this->set_input(2, input3);
+        this->set_input(3, input4);
 
-base::Status Layer::forward(const tensor::Tensor& input1, const tensor::Tensor& input2,
-                            const tensor::Tensor& input3, const tensor::Tensor& input4,
-                            const tensor::Tensor& output1) {
-    this->set_input(0, input1);
-    this->set_input(1, input2);
-    this->set_input(2, input3);
-    this->set_input(3, input4);
+        this->set_output(0, output1);
+        return this->forward();
+    }
 
-    this->set_output(0, output1);
-    return this->forward();
-}
+    base::Status Layer::forward(const tensor::Tensor& input1, const tensor::Tensor& input2,
+                                const tensor::Tensor& input3, const tensor::Tensor& input4,
+                                const tensor::Tensor& input5, const tensor::Tensor& output1) {
+        this->set_input(0, input1);
+        this->set_input(1, input2);
+        this->set_input(2, input3);
+        this->set_input(3, input4);
+        this->set_input(4, input5);
 
-base::Status Layer::forward(const tensor::Tensor& input1, const tensor::Tensor& input2,
-                            const tensor::Tensor& input3, const tensor::Tensor& input4,
-                            const tensor::Tensor& input5, const tensor::Tensor& output1) {
-    this->set_input(0, input1);
-    this->set_input(1, input2);
-    this->set_input(2, input3);
-    this->set_input(3, input4);
-    this->set_input(4, input5);
+        this->set_output(0, output1);
+        return this->forward();
+    }
 
-    this->set_output(0, output1);
-    return this->forward();
-}
-
-tensor::Tensor& LayerParam::get_weight(int32_t idx) {
-    CHECK_GE(idx, 0);
-    CHECK_LT(idx, weights_.size());
-    return weights_.at(idx);
-}
+    tensor::Tensor& LayerParam::get_weight(int32_t idx) {
+        CHECK_GE(idx, 0);
+        CHECK_LT(idx, weights_.size());
+        return weights_.at(idx);
+    }
 
 }  // namespace op

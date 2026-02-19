@@ -1,7 +1,32 @@
+/**
+ * @file rmsnorm_kernel.cpp
+ * @brief CPU RMS Normalization 算子（Armadillo）
+ *
+ * 每行计算：
+ *   rms = 1 / sqrt(mean(x²) + eps)
+ *   output = weight * (input * rms)
+ *
+ * 支持 Batch 处理：输入 [total_tokens, hidden_dim]，按行归一化。
+ */
 #include <armadillo>
 #include "../kernel_registry.h"
 
 namespace kernel {
+/**
+ * @brief CPU RMS Normalization（逐行处理）
+ *
+ * 对每行（Token）独立计算：
+ *   rms = 1 / sqrt(mean(x²) + eps)
+ *   output = weight ⊗ (input × rms)  （⊗ = 逐元素乘法）
+ *
+ * 支持 Batch：当 Input 为 [total_tokens, hidden_dim] 时，每行独立归一化。
+ * eps 取值：Qwen2/Qwen3 为 1e-6，其他模型为 1e-5。
+ *
+ * @param input   输入 Tensor [total_tokens, hidden_dim]，CPU 设备
+ * @param weight  归一化权重 Tensor [hidden_dim]，所有行共享
+ * @param output  输出 Tensor，与 input 同 shape
+ * @param stream  未使用
+ */
 void rmsnorm_kernel_cpu(const tensor::Tensor& input, const tensor::Tensor& weight,
                         const tensor::Tensor& output, [[maybe_unused]] void* stream) {
     CHECK(!input.is_empty());

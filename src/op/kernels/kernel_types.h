@@ -1,3 +1,17 @@
+/**
+ * @file kernel_types.h
+ * @brief 底层算子标准接口签名定义（using 函数指针别名）
+ *
+ * 定义所有 Kernel 函数的 C 函数指针类型（FnType），供 KernelRegistry 与算子层使用。
+ * 规范：
+ *   - 返回类型统一为 void
+ *   - 最后一个参数统一为 void* stream_or_config
+ *     （CPU 实现用 [[maybe_unused]] 忽略，CUDA 实现转为 cudaStream_t 或 CudaConfig*）
+ *
+ * 包含的算子类型：
+ *   Add / Matmul / Embedding / SwiGLU / RMSNorm / RoPE / SinCosCalc /
+ *   PagedKVWrite / PagedAttention / PrefillAttention / Argmax
+ */
 #ifndef NANO_INFER_KERNEL_TYPES_H
 #define NANO_INFER_KERNEL_TYPES_H
 

@@ -1,6 +1,18 @@
+/**
+ * @file argmax_kernel.cu
+ * @brief CUDA Batched Argmax 算子
+ *
+ * 每个 Block 处理 Batch 中的一行，通过两级归约查找最大值索引：
+ *   1. Thread-local 归约（Block-Stride 循环遍历 vocab_size）
+ *   2. Warp Reduce（__shfl_down_sync 树状归约）
+ *   3. Block Reduce（Shared Memory + Warp 0 汇总）
+ *
+ * Grid: (batch_size)，Block: 256 线程。
+ */
 #include <cuda_runtime.h>
 #include <cfloat>
 #include "../kernel_registry.h"
+
 
 namespace kernel {
 // =========================================================================================

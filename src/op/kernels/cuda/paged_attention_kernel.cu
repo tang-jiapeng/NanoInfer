@@ -1,14 +1,61 @@
+/**
+ * @file paged_attention_kernel.cu
+ * @brief PagedAttention V1 CUDA Kernel（Decode 阶段专用）
+ *
+ * 算法概述：
+ *   在 Decode 阶段，每个序列每步只产生 1 个新 Query token，需要与该序列
+ *   历史所有 context_len 个 K/V token 做 Attention。Key/Value 以非连续的
+ *   "物理块" 形式存储在显存池中（即 PagedAttention 机制）。
+ *
+ * 计算流程（对每个 Query Head）：
+ *   1. 将 Query 向量加载到 Shared Memory
+ *   2. 遍历 KV Cache：查 block_table 将逻辑位置 t → 物理块地址，
+ *      计算 score[t] = Q · K[t]
+ *   3. Softmax(score * scale)
+ *   4. 加权求和 output = Σ prob[t] * V[t]
+ *
+ * KV Cache 物理布局：
+ *   [num_blocks, block_size, num_kv_heads, head_size]
+ *   stride_block = block_size * num_kv_heads * head_size
+ *   stride_token = num_kv_heads * head_size
+ *   stride_head  = head_size
+ *
+ * 线程映射：
+ *   Grid  = (num_heads, batch_size)    → 每个 Block 处理 1 个 (head, seq) 对
+ *   Block = 128 threads                → 并行遍历序列维度 & Head 维度
+ *
+ * GQA 支持：
+ *   num_heads > num_kv_heads 时，多个 Query Head 共享同一个 KV Head
+ *   kv_head_idx = head_idx / (num_heads / num_kv_heads)
+ *
+ * 局限性（V1 版本）：
+ *   Softmax 的 logits 全部存在 Dynamic Shared Memory 中，
+ *   大小为 max_context_len * sizeof(float)。当序列非常长时
+ *   （如 >12K）可能超出 Shared Memory 上限，需要 V2（Block-wise Reduction）。
+ */
 #include <cuda_runtime.h>
 #include <cfloat>
 #include <cub/block/block_reduce.cuh>
 #include "../kernel_registry.h"
 namespace kernel {
 
+/**
+ * @brief 原地 Softmax（Block 协作版）
+ *
+ * 在 Shared Memory 中对 logits[0..size-1] 执行 Scaled Softmax：
+ *   1. 每个元素乘以 scale（即 1/√head_size），同时找全局最大值
+ *   2. 所有元素减去最大值后 exp，求和
+ *   3. 除以求和值完成归一化
+ *
+ * 使用 CUB BlockReduce 做 Max 和 Sum 的 Block 级别 Reduction。
+ *
+ * @tparam BLOCK_SIZE 线程块大小（必须与 launch 配置一致）
+ */
 template <int BLOCK_SIZE>
 __device__ void softmax_inplace(float* __restrict__ logits, int size, float scale) {
     const int tid = threadIdx.x;
 
-    // 1. Find Max (利用 scale 预处理，防止溢出)
+    // ---- Phase 1: 缩放并求全局最大值（数值稳定性） ----
     float local_max = -FLT_MAX;
     for (int i = tid; i < size; i += BLOCK_SIZE) {
         logits[i] *= scale;
@@ -24,7 +71,7 @@ __device__ void softmax_inplace(float* __restrict__ logits, int size, float scal
     __syncthreads();
     global_max = shared_max;
 
-    // 2. Exp & Sum
+    // ---- Phase 2: exp(x - max) 并求和 ----
     float local_sum = 0.0f;
     for (int i = tid; i < size; i += BLOCK_SIZE) {
         float val = __expf(logits[i] - global_max);
@@ -32,7 +79,7 @@ __device__ void softmax_inplace(float* __restrict__ logits, int size, float scal
         local_sum += val;
     }
 
-    __syncthreads();  // Reuse temp_storage
+    __syncthreads();
     float global_sum = BlockReduce(temp_storage).Sum(local_sum);
 
     __shared__ float shared_sum;
@@ -40,81 +87,81 @@ __device__ void softmax_inplace(float* __restrict__ logits, int size, float scal
     __syncthreads();
     global_sum = shared_sum;
 
-    // 3. Normalize
+    // ---- Phase 3: 归一化 ----
     float inv_sum = 1.0f / (global_sum + 1e-6f);
     for (int i = tid; i < size; i += BLOCK_SIZE) {
         logits[i] *= inv_sum;
     }
 }
 
-// =========================================================================================
-// Kernel: Paged Attention V1
-// 模板参数：
-// BLOCK_SIZE: CUDA 线程块大小 (128)
-// HEAD_SIZE: Head 维度 (64, 80, 96, 128, 256)
-// KV_BLOCK_SIZE: PagedBlock 大小 (16, 32)
-// =========================================================================================
+/**
+ * @brief PagedAttention V1 核心 Kernel
+ *
+ * 每个 CUDA Block 负责一个 (Query Head, Sequence) 对的完整 Attention 计算：
+ *   1. 加载 Q 到 Shared Memory（向量化 float4 加载）
+ *   2. 遍历 context_len 个历史 token，查 block_table 做地址转换，
+ *      计算 score = Q · K（点积，循环展开优化）
+ *   3. Softmax
+ *   4. 遍历 V，加权求和写入 output
+ *
+ * @tparam BLOCK_SIZE    线程块大小（128）
+ * @tparam HEAD_SIZE     编译期 Head 维度（64/80/96/128/256）
+ * @tparam KV_BLOCK_SIZE KV Cache 的 Page 大小（16/32）
+ */
 template <int BLOCK_SIZE, int HEAD_SIZE, int KV_BLOCK_SIZE>
 __global__ void paged_attention_kernel_v1(
     float* __restrict__ output, const float* __restrict__ query, const float* __restrict__ k_cache,
     const float* __restrict__ v_cache, const int32_t* __restrict__ block_table,
     const int32_t* __restrict__ context_lens, int32_t num_kv_heads, int32_t max_blocks_per_seq,
     float scale, int32_t stride_block, int32_t stride_token, int32_t stride_head) {
-    const int head_idx = blockIdx.x;
-    const int seq_idx = blockIdx.y;
+    const int head_idx = blockIdx.x;  // 当前 Query Head 索引
+    const int seq_idx = blockIdx.y;   // 当前序列索引
     const int tid = threadIdx.x;
 
-    // 1. 获取当前序列长度
     const int seq_len = context_lens[seq_idx];
     if (seq_len == 0) return;
 
-    // 2. GQA 映射: 当前 Query Head 对应哪个 KV Head
+    // ---- GQA 映射：Query Head → KV Head ----
+    // 例如 num_heads=32, num_kv_heads=8 → 每 4 个 Q Head 共享 1 个 KV Head
     const int num_heads = gridDim.x;
     const int heads_per_kv = num_heads / num_kv_heads;
     const int kv_head_idx = head_idx / heads_per_kv;
 
-    // 3. 加载 Query 到 Shared Memory
-    // HEAD_SIZE 是编译期常量，此处申请静态 Shared Memory 可能会超，所以我们只对
-    // Query 用静态 更好的方式是 Q 用寄存器(如果 HEAD_SIZE 小) 或
-    // Shared。这里为了通用性用 Shared。
+    // ---- 将 Q 加载到 Shared Memory ----
     __shared__ float smem_q[HEAD_SIZE];
-
     const int q_offset = seq_idx * num_heads * HEAD_SIZE + head_idx * HEAD_SIZE;
 
-    // 向量化加载 float4
-    // 假设 HEAD_SIZE 是 4 的倍数 (Llama/Qwen 都是)
+    // 向量化加载：每次读 float4（16 bytes），减少 Global Memory 访问次数
     const float4* q_ptr_4 = reinterpret_cast<const float4*>(query + q_offset);
     float4* smem_q_4 = reinterpret_cast<float4*>(smem_q);
-
     for (int i = tid; i < HEAD_SIZE / 4; i += BLOCK_SIZE) {
         smem_q_4[i] = q_ptr_4[i];
     }
-    // 处理不能被 4 整除的尾部 (虽然 HEAD_SIZE 通常是 32 的倍数)
-    // 这里为了性能，假设 HEAD_SIZE % 4 == 0
     __syncthreads();
 
-    // 4. 计算 Attention Scores (Q * K^T)
-    // Logits 存储在动态 Shared Memory 中
+    // ---- 计算 Attention Score: score[t] = Q · K[t] ----
+    // logits 存储在 Dynamic Shared Memory 中（大小 = max_context_len * 4B）
     extern __shared__ float smem_logits[];
 
-    // 遍历序列中的所有 Token
     for (int t = tid; t < seq_len; t += BLOCK_SIZE) {
-        // 逻辑坐标 -> 物理坐标
+        // 逻辑位置 t → 物理地址：
+        //   逻辑块号 = t / KV_BLOCK_SIZE
+        //   块内偏移 = t % KV_BLOCK_SIZE
+        //   物理块号 = block_table[seq_idx * max_blocks_per_seq + 逻辑块号]
         const int log_block_idx = t / KV_BLOCK_SIZE;
         const int block_offset = t % KV_BLOCK_SIZE;
         const int phys_block_idx = block_table[seq_idx * max_blocks_per_seq + log_block_idx];
 
-        // 计算物理地址
+        // 根据 Cache 布局 [num_blocks, block_size, num_kv_heads, head_size]
+        // 计算偏移
         int64_t base_offset = static_cast<int64_t>(phys_block_idx) * stride_block +
                               static_cast<int64_t>(block_offset) * stride_token +
                               static_cast<int64_t>(kv_head_idx) * stride_head;
 
         const float* k_ptr = k_cache + base_offset;
 
-        // 点积计算
+        // 点积：Q · K[t]
         float score = 0.0f;
-
-// 循环展开优化
 #pragma unroll
         for (int i = 0; i < HEAD_SIZE; ++i) {
             score += smem_q[i] * k_ptr[i];
@@ -123,17 +170,16 @@ __global__ void paged_attention_kernel_v1(
     }
     __syncthreads();
 
-    // 5. Softmax
+    // ---- Softmax(score * scale) ----
     softmax_inplace<BLOCK_SIZE>(smem_logits, seq_len, scale);
     __syncthreads();
 
-    // 6. 聚合 Value (O = Score * V)
+    // ---- 加权求和: output = Σ prob[t] * V[t] ----
+    // 外层：每个线程负责 output 向量的一部分维度
+    // 内层：遍历整个序列做加权求和
     float acc_val = 0.0f;
-
-    // 外层循环：Head 维度并行 (每个线程负责计算 output 的一部分)
     for (int i = tid; i < HEAD_SIZE; i += BLOCK_SIZE) {
         acc_val = 0.0f;
-        // 内层循环：对序列长度求和
         for (int t = 0; t < seq_len; ++t) {
             float prob = smem_logits[t];
 
@@ -146,16 +192,13 @@ __global__ void paged_attention_kernel_v1(
                                   static_cast<int64_t>(kv_head_idx) * stride_head;
 
             const float* v_ptr = v_cache + base_offset;
-
             acc_val += prob * v_ptr[i];
         }
-
-        // 写入 Global Memory
         output[q_offset + i] = acc_val;
     }
 }
 
-// 定义宏来简化 switch-case
+// 启动宏：简化模板参数 Dispatch
 #define LAUNCH_ATTENTION_V1(HEAD_SIZE_VAL, BLOCK_SIZE_VAL)                                     \
     paged_attention_kernel_v1<128, HEAD_SIZE_VAL, BLOCK_SIZE_VAL>                              \
         <<<grid, 128, smem_size, cuda_stream>>>(                                               \
@@ -163,35 +206,42 @@ __global__ void paged_attention_kernel_v1(
             v_cache.ptr<float>(), block_table.ptr<int32_t>(), context_lens.ptr<int32_t>(),     \
             num_kv_heads, max_blocks_per_seq, scale, stride_block, stride_token, stride_head)
 
+/**
+ * @brief PagedAttention V1 Host 入口
+ *
+ * 根据 head_size 和 block_size 做二级 switch-case 编译期模板 Dispatch。
+ * HEAD_SIZE / KV_BLOCK_SIZE 作为模板参数，使 Kernel 内部循环展开和
+ * Shared Memory 分配在编译期确定。
+ *
+ * Dynamic Shared Memory 大小 = max_context_len * sizeof(float)，
+ * 用于存放 Attention Score（V1 的 Shared Memory 瓶颈所在）。
+ */
 void paged_attention_kernel_cu(const tensor::Tensor& query, const tensor::Tensor& output,
-                            const tensor::Tensor& k_cache, const tensor::Tensor& v_cache,
-                            const tensor::Tensor& block_table, const tensor::Tensor& context_lens,
-                            int32_t max_context_len, int32_t num_heads, int32_t num_kv_heads,
-                            int32_t head_size, int32_t block_size, float scale, void* stream) {
+                               const tensor::Tensor& k_cache, const tensor::Tensor& v_cache,
+                               const tensor::Tensor& block_table,
+                               const tensor::Tensor& context_lens, int32_t max_context_len,
+                               int32_t num_heads, int32_t num_kv_heads, int32_t head_size,
+                               int32_t block_size, float scale, void* stream) {
     int32_t batch_size = static_cast<int32_t>(query.get_dim(0));
     int32_t max_blocks_per_seq = static_cast<int32_t>(block_table.get_dim(1));
 
+    // Cache 布局 strides: [num_blocks, block_size, num_kv_heads, head_size]
     int32_t stride_head = head_size;
     int32_t stride_token = num_kv_heads * stride_head;
     int32_t stride_block = block_size * stride_token;
 
+    // Grid: 每个 Block 处理一个 (head, seq) 对
     dim3 grid(num_heads, batch_size);
     cudaStream_t cuda_stream = static_cast<cudaStream_t>(stream);
 
-    // 计算 Shared Memory 大小
-    // 需要存储 logits [max_context_len]
-    // 注意：如果 Context 很长 (如 > 4096)，Shared Mem 可能会不够。
-    // V1 版本受限于 Shared Mem 大小。这也是为什么会有 V2 (Block-based
-    // reduction)。 这里我们先做个检查。一般 GPU Shared Mem 有 48KB - 164KB。
-    // max_context_len * 4 bytes. 4096 * 4 = 16KB (安全)。
-    // 8192 * 4 = 32KB (安全)。
+    // Dynamic Shared Memory：存放 logits[max_context_len]
+    // 4096 tokens × 4B = 16KB (安全), 8192 × 4B = 32KB (安全)
+    // 超长序列可能溢出 → 需 V2 (Block-wise Reduction)
     size_t smem_size = max_context_len * sizeof(float);
 
-    // 双重 Switch Dispatch
-    // 外层 Block Size
+    // 二级 Dispatch: block_size → head_size
     switch (block_size) {
         case 16:
-            // 内层 Head Size
             switch (head_size) {
                 case 64:
                     LAUNCH_ATTENTION_V1(64, 16);
@@ -207,7 +257,7 @@ void paged_attention_kernel_cu(const tensor::Tensor& query, const tensor::Tensor
                     break;
                 case 128:
                     LAUNCH_ATTENTION_V1(128, 16);
-                    break;  // Llama-2/3, Qwen Standard
+                    break;
                 case 256:
                     LAUNCH_ATTENTION_V1(256, 16);
                     break;
@@ -232,7 +282,7 @@ void paged_attention_kernel_cu(const tensor::Tensor& query, const tensor::Tensor
                     break;
                 case 128:
                     LAUNCH_ATTENTION_V1(128, 32);
-                    break;  // Llama-2/3, Qwen Large Block
+                    break;
                 case 256:
                     LAUNCH_ATTENTION_V1(256, 32);
                     break;

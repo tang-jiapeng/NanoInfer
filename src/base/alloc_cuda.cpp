@@ -1,3 +1,19 @@
+/**
+ * @file alloc_cuda.cpp
+ * @brief CUDA 显存分配器实现（带内存池与 GC 回收）
+ *
+ * CUDADeviceAllocator 实现了两级内存池策略：
+ *   - big_buffers_map_：分配量 > 1MB 时使用大块池，采用 Best-Fit 匹配（容差 1MB 内复用）
+ *   - cuda_buffers_map_：分配量 ≤ 1MB 时使用小块池，精确匹配 size
+ *
+ * 释放策略（Lazy Release + GC）：
+ *   - release() 将 Buffer 标记为 idle（不立即调用 cudaFree）
+ *   - 当累计 idle 显存超过 1GB（kMaxIdleSizeThreshold）时触发 GC，
+ *     释放空闲且无引用的 Buffer
+ *
+ * 所有池按 CUDA Device ID 隔离，支持多 GPU 场景。
+ * 通过 CUDADeviceAllocatorFactory 单例工厂获取全局唯一实例。
+ */
 #include <cuda_runtime_api.h>
 #include <driver_types.h>
 #include "nanoinfer/base/alloc.h"
@@ -7,6 +23,15 @@ namespace base {
 CUDADeviceAllocator::CUDADeviceAllocator() : DeviceAllocator(DeviceType::kDeviceCUDA) {
 }
 
+/**
+ * @brief CUDA 显存分配（两级内存池）
+ *
+ * 分配流程：
+ *   1. 大块（> 1MB）：在 big_buffers_map_ 中 Best-Fit 查找空闲块（容差 1MB），
+ *      命中则复用，否则 cudaMalloc 并加入池
+ *   2. 小块（≤ 1MB）：在 cuda_buffers_map_ 中精确匹配 size，
+ *      命中则复用并更新 no_busy_cnt_，否则 cudaMalloc
+ */
 void* CUDADeviceAllocator::allocate(size_t byte_size) const {
     int id = -1;
     cudaError_t state = cudaGetDevice(&id);
@@ -17,8 +42,7 @@ void* CUDADeviceAllocator::allocate(size_t byte_size) const {
         for (int i = 0; i < big_buffers.size(); i++) {
             if (big_buffers[i].byte_size >= byte_size && !big_buffers[i].busy &&
                 big_buffers[i].byte_size - byte_size < 1 * 1024 * 1024) {
-                if (sel_id == -1 ||
-                    big_buffers[sel_id].byte_size > big_buffers[i].byte_size) {
+                if (sel_id == -1 || big_buffers[sel_id].byte_size > big_buffers[i].byte_size) {
                     sel_id = i;
                 }
             }
@@ -68,6 +92,14 @@ void* CUDADeviceAllocator::allocate(size_t byte_size) const {
     return ptr;
 }
 
+/**
+ * @brief 释放 CUDA 显存（Lazy Release + GC）
+ *
+ * 释放流程：
+ *   1. GC 检查：若某 Device 的 idle 总量超过 1GB，批量 cudaFree 所有 idle Buffer
+ *   2. 标记 idle：将目标 Buffer 的 busy 置为 false，累加 no_busy_cnt_
+ *   3. 大块池释放：对 big_buffers_map_ 进行相同标记操作
+ */
 void CUDADeviceAllocator::release(void* ptr) const {
     if (!ptr) {
         return;

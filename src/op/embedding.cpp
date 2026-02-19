@@ -1,3 +1,10 @@
+/**
+ * @file embedding.cpp
+ * @brief Embedding 查表层实现（EmbeddingLayer）
+ *
+ * 计算：Output[i] = Weight[Input[i]]（根据 Token ID 查表取出对应向量）
+ * 输入：[token_num] (Int32)，权重：[vocab_size, dim]，输出：[token_num, dim]
+ */
 #include "nanoinfer/op/embedding.h"
 #include "kernels/kernel_registry.h"
 #include "kernels/kernel_types.h"
@@ -15,6 +22,7 @@ EmbeddingLayer::EmbeddingLayer(base::DeviceType device_type, int32_t dim, int32_
     reset_output_size(1);
 }
 
+/** @brief 输入校验：Input [token_num] + Weight [vocab_size, dim] + Output [token_num, dim] */
 base::Status EmbeddingLayer::check() const {
     const auto& input_tensor = get_input(0);
     int32_t token_num = static_cast<int32_t>(input_tensor.size());
@@ -41,6 +49,7 @@ base::Status EmbeddingLayer::check() const {
     return base::error::Success();
 }
 
+/** @brief 前向计算：校验后分发 "embedding" 算子 */
 base::Status EmbeddingLayer::forward() {
     base::Status status = check();
     if (!status) {

@@ -1,3 +1,14 @@
+/**
+ * @file swiglu.cpp
+ * @brief SwiGLU 激活层实现（SwiGLULayer）
+ *
+ * 计算：Output = Swish(Gate) * Up
+ *   - Gate = Input1（门控投影 W1 的输出）
+ *   - Up   = Input2（上投影 W3 的输出）
+ *   - Swish(x) = x * sigmoid(x)
+ *
+ * 常用于 LLaMA FFN 层中的非线性激活。
+ */
 #include "nanoinfer/op/swiglu.h"
 #include "kernels/kernel_registry.h"
 #include "kernels/kernel_types.h"
@@ -10,6 +21,7 @@ SwiGLULayer::SwiGLULayer(base::DeviceType device_type, int32_t hidden_dim)
     reset_output_size(1);
 }
 
+/** @brief 输入校验：两个输入形状一致、输出尺寸匹配 */
 base::Status SwiGLULayer::check() const {
     const auto& input1 = get_input(0);
     const auto& input2 = get_input(1);
@@ -31,6 +43,7 @@ base::Status SwiGLULayer::check() const {
     return base::error::Success();
 }
 
+/** @brief 前向计算：校验后分发 "swiglu" 算子 */
 base::Status SwiGLULayer::forward() {
     auto status = check();
     if (!status) {

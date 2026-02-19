@@ -1,3 +1,14 @@
+/**
+ * @file paged_attention_kernel.cpp
+ * @brief CPU Paged Attention 算子（Decode 阶段）
+ *
+ * 基于 Block Table 的注意力计算，适用于 Decode 阶段（每请求单 Token Query）：
+ *   1. Q @ K^T → scores (scaled dot-product)，Key 从 Paged Cache 中按 Block 查找
+ *   2. Softmax(scores)
+ *   3. scores @ V → Output，Value 同样从 Paged Cache 查找
+ *
+ * Cache 布局: [num_blocks, block_size, num_kv_heads, head_size]
+ */
 #include <cfloat>
 #include <cmath>
 #include <cstring>
@@ -6,6 +17,30 @@
 
 namespace kernel {
 
+/**
+ * @brief CPU Paged Attention（Decode 阶段）
+ *
+ * 对每个 (sequence, head) 计算完整的 Scaled Dot-Product Attention：
+ *   1. Q · K^T → scores（K 从 Paged Cache 中按 Block Table 查找）
+ *   2. Softmax(scores × scale)
+ *   3. 加权求和 V → output（V 同样从 Paged Cache 查找）
+ *
+ * 支持 GQA：多个 Q Head 共享同一个 KV Head。
+ *
+ * @param query            输入 Query [batch_size, num_heads × head_size]
+ * @param output           输出 Tensor，shape 同 query
+ * @param k_cache          Key Cache [num_blocks, block_size, num_kv_heads, head_size]
+ * @param v_cache          Value Cache，布局同 k_cache
+ * @param block_table      Block Table [batch_size, max_blocks_per_seq]，Int32
+ * @param context_lens     每个序列的上下文长度 [batch_size]，Int32
+ * @param max_context_len  未使用（保留接口兼容）
+ * @param num_heads        Q Head 数
+ * @param num_kv_heads     KV Head 数（GQA 时 < num_heads）
+ * @param head_size        单个 Head 维度
+ * @param block_size       每个物理 Block 容纳的 Token 数
+ * @param scale            注意力缩放因子（通常 = 1/√head_size）
+ * @param stream           未使用
+ */
 void paged_attention_kernel_cpu(const tensor::Tensor& query, const tensor::Tensor& output,
                                 const tensor::Tensor& k_cache, const tensor::Tensor& v_cache,
                                 const tensor::Tensor& block_table,
@@ -18,7 +53,8 @@ void paged_attention_kernel_cpu(const tensor::Tensor& query, const tensor::Tenso
     int32_t max_blocks_per_seq = static_cast<int32_t>(block_table.get_dim(1));
     int32_t heads_per_kv = num_heads / num_kv_heads;
 
-    // Cache strides: [num_blocks, block_size, num_kv_heads, head_size]
+    // Cache strides: [num_blocks, block_size, num_kv_heads,
+    // head_size]
     int32_t stride_head = head_size;
     int32_t stride_token = num_kv_heads * stride_head;
     int32_t stride_block = block_size * stride_token;

@@ -1,3 +1,15 @@
+/**
+ * @file block_manager.cpp
+ * @brief 物理 Block 分配管理器实现（基于栈的空闲列表）
+ *
+ * BlockManager 维护固定数量的物理 Block，提供：
+ *   - allocate()：从空闲栈弹出 Block ID（支持单个和批量）
+ *   - free()：将 Block ID 压回空闲栈（带重复释放检测）
+ *   - get_utilization()：内存利用率 = 已分配 / 总数
+ *   - reset()：全量释放并重置栈
+ *
+ * 可选线程安全模式（通过 LockGuard 条件加锁）。
+ */
 #include "nanoinfer/engine/block_manager.h"
 #include <glog/logging.h>
 
@@ -17,18 +29,17 @@ BlockManager::BlockManager(int32_t num_blocks, int32_t block_size, bool thread_s
     VLOG(1) << "BlockManager initialized:";
     VLOG(1) << "  Total blocks: " << num_blocks;
     VLOG(1) << "  Block size: " << block_size << " tokens";
-    VLOG(1) << "  Total capacity: " << (static_cast<size_t>(num_blocks) * block_size)
-            << " tokens";
+    VLOG(1) << "  Total capacity: " << (static_cast<size_t>(num_blocks) * block_size) << " tokens";
     VLOG(1) << "  Thread-safe: " << (thread_safe ? "yes" : "no");
 }
 
+/** @brief 分配单个 Block，从空闲栈弹出 Block ID */
 base::Status BlockManager::allocate(int32_t& block_id) {
     LockGuard lock(mutex_, thread_safe_);
 
     if (free_blocks_.empty()) {
-        return base::error::InternalError(
-            "No free blocks available (OOM). Total blocks: " +
-            std::to_string(num_blocks_) + ", All allocated.");
+        return base::error::InternalError("No free blocks available (OOM). Total blocks: " +
+                                          std::to_string(num_blocks_) + ", All allocated.");
     }
 
     block_id = free_blocks_.back();
@@ -36,12 +47,13 @@ base::Status BlockManager::allocate(int32_t& block_id) {
 
     allocated_[block_id] = true;
 
-    VLOG(2) << "Allocated block " << block_id
-            << " (free blocks remaining: " << free_blocks_.size() << ")";
+    VLOG(2) << "Allocated block " << block_id << " (free blocks remaining: " << free_blocks_.size()
+            << ")";
 
     return base::error::Success();
 }
 
+/** @brief 批量分配 Block，连续弹出 num_blocks_needed 个 Block ID */
 base::Status BlockManager::allocate(int32_t num_blocks_needed,
                                     std::vector<int32_t>& allocated_blocks) {
     LockGuard lock(mutex_, thread_safe_);
@@ -72,12 +84,12 @@ base::Status BlockManager::allocate(int32_t num_blocks_needed,
     return base::error::Success();
 }
 
+/** @brief 释放单个 Block，压回空闲栈（带重复释放检测） */
 base::Status BlockManager::free(int32_t block_id) {
     LockGuard lock(mutex_, thread_safe_);
 
     if (!is_valid_block_id(block_id)) {
-        return base::error::InvalidArgument("Invalid block ID: " +
-                                            std::to_string(block_id));
+        return base::error::InvalidArgument("Invalid block ID: " + std::to_string(block_id));
     }
 
     if (!allocated_[block_id]) {
@@ -88,12 +100,12 @@ base::Status BlockManager::free(int32_t block_id) {
     allocated_[block_id] = false;
     free_blocks_.push_back(block_id);
 
-    VLOG(2) << "Freed block " << block_id << " (free blocks: " << free_blocks_.size()
-            << ")";
+    VLOG(2) << "Freed block " << block_id << " (free blocks: " << free_blocks_.size() << ")";
 
     return base::error::Success();
 }
 
+/** @brief 批量释放 Block（先校验全部合法，再逐个归还） */
 base::Status BlockManager::free(const std::vector<int32_t>& block_ids) {
     LockGuard lock(mutex_, thread_safe_);
 
@@ -137,6 +149,7 @@ bool BlockManager::is_allocated(int32_t block_id) const {
     return allocated_[block_id];
 }
 
+/** @brief 重置所有 Block 为空闲状态 */
 void BlockManager::reset() {
     LockGuard lock(mutex_, thread_safe_);
 

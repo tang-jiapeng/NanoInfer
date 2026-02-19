@@ -6,7 +6,6 @@
 #include "nanoinfer/base/base.h"
 #include "nanoinfer/tensor/tensor.h"
 
-
 class AddKernelTest : public ::testing::Test {
    protected:
     void SetUp() override {

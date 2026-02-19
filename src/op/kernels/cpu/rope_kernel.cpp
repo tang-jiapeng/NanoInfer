@@ -1,8 +1,39 @@
+/**
+ * @file rope_kernel.cpp
+ * @brief CPU 旋转位置编码（RoPE）算子
+ *
+ * 对 Query 和 Key 进行原地 (In-place) 旋转编码：
+ *   x' = x * cos(θ) - y * sin(θ)
+ *   y' = x * sin(θ) + y * cos(θ)
+ *
+ * 每个 Token 根据其位置索引从预计算的 Sin/Cos Cache 中查表。
+ * 支持 GQA/MQA：K 只旋转前 kv_dim 元素（而 Q 旋转全部 dim）。
+ */
 #include <armadillo>
 #include "../kernel_registry.h"
 
 namespace kernel {
 
+/**
+ * @brief CPU 旋转位置编码（RoPE）
+ *
+ * 对 Q 和 K 施加 In-place 旋转编码，每对相邻元素 (x, y) 执行：
+ *   x' = x × cos(θ) - y × sin(θ)
+ *   y' = x × sin(θ) + y × cos(θ)
+ * Sin/Cos 值从预计算 Cache 中按 (pos, head_dim) 索引查表。
+ *
+ * GQA 支持：Q 旋转全部 dim 维度，K 只旋转前 kv_dim 维度。
+ *
+ * @param dim         Q 的总维度（= num_heads × head_size）
+ * @param kv_dim      K 的总维度（= num_kv_heads × head_size，GQA 时 < dim）
+ * @param head_size   单个 Head 维度（用于频率取模）
+ * @param input_q     Query Tensor [total_tokens, dim]，in-place 修改
+ * @param input_k     Key Tensor [total_tokens, kv_dim]，in-place 修改
+ * @param input_pos   位置索引 Tensor [total_tokens]，Int32
+ * @param sin_cache   预计算 Sin Cache [max_seq_len, head_size]
+ * @param cos_cache   预计算 Cos Cache [max_seq_len, head_size]
+ * @param stream      未使用
+ */
 void rope_kernel_cpu(int32_t dim, int32_t kv_dim, int32_t head_size, const tensor::Tensor& input_q,
                      const tensor::Tensor& input_k, const tensor::Tensor& input_pos,
                      const tensor::Tensor& sin_cache, const tensor::Tensor& cos_cache,

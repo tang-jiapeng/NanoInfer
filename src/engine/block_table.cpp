@@ -1,15 +1,25 @@
+/**
+ * @file block_table.cpp
+ * @brief Block Table 实现（序列 ID → 物理 Block ID 映射）
+ *
+ * BlockTable 维护 seq_id → block_ids 的映射关系，支持：
+ *   - allocate_sequence / append_block / free_sequence 等 CRUD 操作
+ *   - to_gpu_format()：将映射平铺为 [num_seqs, max_blocks_per_seq] 的 Int32 Tensor，
+ *     便于作为 GPU Kernel 的输入（-1 填充 Padding）
+ *
+ * 可选线程安全模式（thread_safe_ = true 时加 mutex）。
+ */
 #include "nanoinfer/engine/block_table.h"
 #include <glog/logging.h>
 
 namespace engine {
 
 BlockTable::BlockTable(bool thread_safe) : thread_safe_(thread_safe) {
-    VLOG(1) << "BlockTable initialized (thread-safe: " << (thread_safe ? "yes" : "no")
-            << ")";
+    VLOG(1) << "BlockTable initialized (thread-safe: " << (thread_safe ? "yes" : "no") << ")";
 }
 
-base::Status BlockTable::allocate_sequence(int32_t seq_id,
-                                           const std::vector<int32_t>& block_ids) {
+/** @brief 注册新序列的 Block 映射（seq_id → block_ids） */
+base::Status BlockTable::allocate_sequence(int32_t seq_id, const std::vector<int32_t>& block_ids) {
     LockGuard lock(mutex_, thread_safe_);
 
     if (seq_to_blocks_.find(seq_id) != seq_to_blocks_.end()) {
@@ -19,8 +29,7 @@ base::Status BlockTable::allocate_sequence(int32_t seq_id,
 
     seq_to_blocks_[seq_id] = block_ids;
 
-    VLOG(2) << "Allocated sequence " << seq_id << " with " << block_ids.size()
-            << " blocks";
+    VLOG(2) << "Allocated sequence " << seq_id << " with " << block_ids.size() << " blocks";
 
     if (VLOG_IS_ON(2)) {
         std::string ids_str = "[";
@@ -35,6 +44,7 @@ base::Status BlockTable::allocate_sequence(int32_t seq_id,
     return base::error::Success();
 }
 
+/** @brief 为已有序列追加单个 Block */
 base::Status BlockTable::append_block(int32_t seq_id, int32_t block_id) {
     LockGuard lock(mutex_, thread_safe_);
 
@@ -52,8 +62,8 @@ base::Status BlockTable::append_block(int32_t seq_id, int32_t block_id) {
     return base::error::Success();
 }
 
-base::Status BlockTable::append_blocks(int32_t seq_id,
-                                       const std::vector<int32_t>& block_ids) {
+/** @brief 为已有序列批量追加 Block */
+base::Status BlockTable::append_blocks(int32_t seq_id, const std::vector<int32_t>& block_ids) {
     LockGuard lock(mutex_, thread_safe_);
 
     auto it = seq_to_blocks_.find(seq_id);
@@ -64,14 +74,13 @@ base::Status BlockTable::append_blocks(int32_t seq_id,
 
     it->second.insert(it->second.end(), block_ids.begin(), block_ids.end());
 
-    VLOG(2) << "Appended " << block_ids.size() << " blocks to sequence " << seq_id
-            << " (now " << it->second.size() << " blocks)";
+    VLOG(2) << "Appended " << block_ids.size() << " blocks to sequence " << seq_id << " (now "
+            << it->second.size() << " blocks)";
 
     return base::error::Success();
 }
 
-base::Status BlockTable::get_blocks(int32_t seq_id,
-                                    std::vector<int32_t>& block_ids) const {
+base::Status BlockTable::get_blocks(int32_t seq_id, std::vector<int32_t>& block_ids) const {
     LockGuard lock(mutex_, thread_safe_);
 
     auto it = seq_to_blocks_.find(seq_id);
@@ -96,8 +105,8 @@ int32_t BlockTable::get_num_blocks(int32_t seq_id) const {
     return static_cast<int32_t>(it->second.size());
 }
 
-base::Status BlockTable::free_sequence(int32_t seq_id,
-                                       std::vector<int32_t>& freed_blocks) {
+/** @brief 释放序列并返回其持有的 Block ID 列表（用于归还给 BlockManager） */
+base::Status BlockTable::free_sequence(int32_t seq_id, std::vector<int32_t>& freed_blocks) {
     LockGuard lock(mutex_, thread_safe_);
 
     auto it = seq_to_blocks_.find(seq_id);
@@ -110,8 +119,7 @@ base::Status BlockTable::free_sequence(int32_t seq_id,
     // 从 Map 中移除
     seq_to_blocks_.erase(it);
 
-    VLOG(2) << "Freed sequence " << seq_id << " (" << freed_blocks.size()
-            << " blocks returned)";
+    VLOG(2) << "Freed sequence " << seq_id << " (" << freed_blocks.size() << " blocks returned)";
 
     return base::error::Success();
 }
@@ -139,9 +147,14 @@ int32_t BlockTable::get_num_sequences() const {
     return static_cast<int32_t>(seq_to_blocks_.size());
 }
 
+/**
+ * @brief 将映射表平铺为 GPU 友好的 2D Tensor
+ *
+ * 输出 Shape: [num_seqs, max_blocks_per_seq]，类型 Int32，未使用位置填 -1。
+ * 生成的 Tensor 位于 CPU，调用者需自行 to_cuda()。
+ */
 base::Status BlockTable::to_gpu_format(const std::vector<int32_t>& seq_ids,
-                                       int32_t max_blocks_per_seq,
-                                       tensor::Tensor& tensor) const {
+                                       int32_t max_blocks_per_seq, tensor::Tensor& tensor) const {
     LockGuard lock(mutex_, thread_safe_);
 
     if (seq_ids.empty()) {
@@ -158,14 +171,12 @@ base::Status BlockTable::to_gpu_format(const std::vector<int32_t>& seq_ids,
     // 维度: [num_seqs, max_blocks_per_seq]
     // 数据类型: Int32
     // need_alloc = true: 立即分配内存
-    std::shared_ptr<base::DeviceAllocator> alloc =
-        base::CPUDeviceAllocatorFactory::get_instance();
-    tensor = tensor::Tensor(base::DataType::kDataTypeInt32, num_seqs, max_blocks_per_seq,
-                            true, alloc);
+    std::shared_ptr<base::DeviceAllocator> alloc = base::CPUDeviceAllocatorFactory::get_instance();
+    tensor =
+        tensor::Tensor(base::DataType::kDataTypeInt32, num_seqs, max_blocks_per_seq, true, alloc);
 
     if (tensor.ptr<int32_t>() == nullptr) {
-        return base::error::InternalError(
-            "Failed to allocate memory for block table tensor");
+        return base::error::InternalError("Failed to allocate memory for block table tensor");
     }
     // 获取数据指针并填充
     int32_t* data = tensor.ptr<int32_t>();
@@ -187,10 +198,9 @@ base::Status BlockTable::to_gpu_format(const std::vector<int32_t>& seq_ids,
         int32_t num_blocks = static_cast<int32_t>(blocks.size());
 
         if (num_blocks > max_blocks_per_seq) {
-            return base::error::InvalidArgument("Sequence " + std::to_string(seq_id) +
-                                                " has " + std::to_string(num_blocks) +
-                                                " blocks, exceeds max " +
-                                                std::to_string(max_blocks_per_seq));
+            return base::error::InvalidArgument(
+                "Sequence " + std::to_string(seq_id) + " has " + std::to_string(num_blocks) +
+                " blocks, exceeds max " + std::to_string(max_blocks_per_seq));
         }
 
         // 拷贝数据到平铺数组

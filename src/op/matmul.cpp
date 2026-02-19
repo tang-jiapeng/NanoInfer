@@ -1,3 +1,14 @@
+/**
+ * @file matmul.cpp
+ * @brief 矩阵乘法层实现（MatmulLayer）
+ *
+ * 计算：Output = Input * Weight^T * scale（可选 + Bias）
+ * 权重布局：[out_features, in_features]（行主序存储）
+ *
+ * 支持 FP32 和 Int8 量化权重（通过 is_quant_layer_ 区分）。
+ * 可选 Bias 加法（has_bias_ = true 时，通过 "add" 算子叠加）。
+ * 通过 KernelRegistry 分发 "matmul" 算子到 CPU/CUDA 后端。
+ */
 #include "nanoinfer/op/matmul.h"
 #include "kernels/kernel_registry.h"
 #include "kernels/kernel_types.h"
@@ -18,6 +29,15 @@ MatmulLayer::MatmulLayer(base::DeviceType device_type, int32_t dim0, int32_t dim
     }
 }
 
+/**
+ * @brief 输入校验：检查 Input/Weight/Output 的维度匹配
+ *
+ * 维度约定：
+ *   - Input  [batch, K]（最后一维 == dim1_，即 K 维度）
+ *   - Weight [dim0_, dim1_]，即 [N, K]
+ *   - Output [batch, dim0_]（最后一维 == dim0_，即 N 维度）
+ *   - 量化模式额外检查 scales_ 的类型和设备
+ */
 base::Status MatmulLayer::check() const {
     const auto& input_tensor = get_input(0);
 
@@ -89,6 +109,12 @@ base::Status MatmulLayer::check() const {
     return base::error::Success();
 }
 
+/**
+ * @brief 前向计算：Matmul + 可选 Bias Add
+ *
+ * 调用 "matmul" 算子执行 Output = Input * Weight^T * scale。
+ * 若 has_bias_ 为 true，再调用 "add" 算子叠加偏置。
+ */
 base::Status MatmulLayer::forward() {
     auto status = check();
     if (!status) {
@@ -124,6 +150,7 @@ base::Status MatmulLayer::forward() {
     return base::error::Success();
 }
 
+/** @brief 从原始指针构建 Bias Tensor，支持 FP32 和 Int8 量化 */
 base::Status MatmulLayer::set_bias(int32_t idx, int32_t& dim, const void* bias_ptr,
                                    base::DeviceType device_type) {
     CHECK_GE(idx, 0);
@@ -173,6 +200,7 @@ const tensor::Tensor& MatmulLayer::get_bias(int32_t idx) const {
     return bias_.at(idx);
 }
 
+/** @brief 将权重、偏置、缩放因子全部迁移到 CUDA */
 void MatmulLayer::to_cuda() {
     LayerParam::to_cuda();
     if (has_bias_) {

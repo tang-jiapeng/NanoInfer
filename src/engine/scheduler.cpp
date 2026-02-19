@@ -1,3 +1,14 @@
+/**
+ * @file scheduler.cpp
+ * @brief 请求调度器实现（FCFS 策略 + Continuous Batching）
+ *
+ * Scheduler 管理请求的等待队列和运行列表：
+ *   - add_request()：加入 waiting_queue_
+ *   - schedule_next_batch()：
+ *     Phase 1: 所有 Running 请求必须参与（Decode 步进）
+ *     Phase 2: 从 Waiting 队列取新请求填充 Batch（受 max_batch_size / max_sequences 约束）
+ *   - update_after_step()：移除已完成的请求（erase-remove 惯用法）
+ */
 #include "nanoinfer/engine/scheduler.h"
 
 namespace engine {
@@ -14,22 +25,28 @@ Scheduler::Scheduler(int32_t max_batch_size, int32_t max_sequences, int32_t chun
               << ", prefill_chunk_size=" << chunk_size;
 }
 
-int64_t Scheduler::add_request(const std::string& prompt,
-                               const std::vector<int32_t>& prompt_tokens,
+/** @brief 将新推理请求加入等待队列，返回分配的 request_id */
+int64_t Scheduler::add_request(const std::string& prompt, const std::vector<int32_t>& prompt_tokens,
                                int32_t max_new_tokens) {
     int64_t request_id = next_seq_id_++;
-    auto request = std::make_shared<InferenceRequest>(request_id, prompt, prompt_tokens,
-                                                      max_new_tokens);
+    auto request =
+        std::make_shared<InferenceRequest>(request_id, prompt, prompt_tokens, max_new_tokens);
 
     // 加入等待队列
     waiting_queue_.push_back(request);
     request_map_[request_id] = request;
 
-    VLOG(2) << "Added request " << request_id
-            << " to waiting queue (len=" << prompt_tokens.size() << ")";
+    VLOG(2) << "Added request " << request_id << " to waiting queue (len=" << prompt_tokens.size()
+            << ")";
     return request_id;
 }
 
+/**
+ * @brief 调度下一个 Batch（两阶段策略）
+ *
+ * Phase 1: 所有 Running 请求必须参与（保持 KV Cache 连续性）。
+ * Phase 2: 从 Waiting 队列按 FCFS 填充剩余 Batch 槽位。
+ */
 ScheduledBatch Scheduler::schedule_next_batch() {
     ScheduledBatch batch;
 
@@ -50,8 +67,7 @@ ScheduledBatch Scheduler::schedule_next_batch() {
     int32_t current_running_count = static_cast<int32_t>(running_requests_.size());
     int32_t available_seq_slots = max_sequences_ - current_running_count;
 
-    while (remaining_batch_slots > 0 && available_seq_slots > 0 &&
-           !waiting_queue_.empty()) {
+    while (remaining_batch_slots > 0 && available_seq_slots > 0 && !waiting_queue_.empty()) {
         // FCFS 策略: 取队首
         auto req = waiting_queue_.front();
         waiting_queue_.pop_front();
@@ -73,6 +89,7 @@ ScheduledBatch Scheduler::schedule_next_batch() {
     return batch;
 }
 
+/** @brief 移除已完成的请求（erase-remove 惯用法 + finish 状态标记） */
 void Scheduler::update_after_step(const std::vector<int64_t>& finished_request_ids) {
     if (finished_request_ids.empty()) {
         return;
@@ -87,8 +104,7 @@ void Scheduler::update_after_step(const std::vector<int64_t>& finished_request_i
                                      if (req->request_id() == fid) {
                                          // 标记请求完成
                                          req->finish();
-                                         VLOG(2) << "Request " << fid
-                                                 << " finished execution";
+                                         VLOG(2) << "Request " << fid << " finished execution";
                                          return true;  // 标记为移除
                                      }
                                  }

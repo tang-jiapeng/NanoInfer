@@ -1,7 +1,35 @@
+/**
+ * @file matmul_kernel.cpp
+ * @brief CPU 矩阵乘法算子（Armadillo BLAS）
+ *
+ * 计算 Output = Input * Weight^T * scale。
+ * 利用 Armadillo 列主序与 Tensor 行主序的转置关系：
+ *   Arma 视角：Output^T = Weight * Input^T
+ *   等价于行主序：Output = Input * Weight^T
+ */
 #include <armadillo>
 #include "../kernel_registry.h"
 
 namespace kernel {
+/**
+ * @brief CPU 矩阵乘法（Armadillo BLAS）
+ *
+ * 计算 Output = Input × Weight^T × scale。
+ *
+ * 维度约定：
+ *   Input  : [Batch, K]  → Armadillo 视为 [K, Batch] (col-major)
+ *   Weight : [N, K]      → Armadillo 视为 [K, N]     (col-major)
+ *   Output : [Batch, N]  → Armadillo 视为 [N, Batch] (col-major)
+ *
+ * Armadillo 计算：Output_arma = Weight_arma.t() × Input_arma
+ *   即 [N,Batch] = [N,K] × [K,Batch]，对应行主序 Output = Input × Weight^T。
+ *
+ * @param input   输入 Tensor [Batch, K]，CPU 设备
+ * @param weight  权重 Tensor [N, K]，CPU 设备
+ * @param output  输出 Tensor [Batch, N]，CPU 设备
+ * @param scale   缩放因子
+ * @param stream  未使用
+ */
 void matmul_kernel_cpu(const tensor::Tensor& input, const tensor::Tensor& weight,
                        const tensor::Tensor& output, const float scale,
                        [[maybe_unused]] void* stream) {

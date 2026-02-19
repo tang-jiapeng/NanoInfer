@@ -1,3 +1,11 @@
+/**
+ * @file rmsnorm.cpp
+ * @brief RMS Normalization 层实现（RmsNormLayer）
+ *
+ * 计算：Output = (Input / RMS(Input)) * Weight
+ * 其中 RMS(x) = sqrt(mean(x²) + eps)，数值稳定且无需计算均值（相比 LayerNorm）。
+ * 通过 KernelRegistry 分发 "rmsnorm" 算子。
+ */
 #include "nanoinfer/op/rmsnorm.h"
 #include "kernels/kernel_registry.h"
 #include "kernels/kernel_types.h"
@@ -10,6 +18,7 @@ RmsNormLayer::RmsNormLayer(base::DeviceType device_type, int32_t dim)
     reset_weight_size(1);
 }
 
+/** @brief 输入校验：检查空张量、设备一致性、最后一维 == dim_、输出尺寸匹配 */
 base::Status RmsNormLayer::check() const {
     const auto& input = get_input(0);
     const auto& output = get_output(0);
@@ -38,6 +47,7 @@ base::Status RmsNormLayer::check() const {
     return base::error::Success();
 }
 
+/** @brief 前向计算：校验后分发 "rmsnorm" 算子 */
 base::Status RmsNormLayer::forward() {
     auto status = check();
     if (!status) {

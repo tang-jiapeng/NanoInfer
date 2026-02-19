@@ -7,7 +7,6 @@
 #include "nanoinfer/base/base.h"
 #include "nanoinfer/tensor/tensor.h"
 
-
 class PagedAttentionTest : public ::testing::Test {
    protected:
     void SetUp() override {

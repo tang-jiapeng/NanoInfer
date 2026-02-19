@@ -1,8 +1,18 @@
+/**
+ * @file base.cpp
+ * @brief Status 状态码类实现及错误工厂函数
+ *
+ * 提供 NanoInfer 全局统一的错误处理基础设施：
+ *   - Status 类：持有 StatusCode + 错误消息，支持 bool 转换与流式输出
+ *   - error 命名空间：提供一组便捷工厂函数（Success / InvalidArgument /
+ *     InternalError / PathNotValid 等），统一创建 Status 对象
+ */
 #include "nanoinfer/base/base.h"
 #include <string>
 namespace base {
-Status::Status(int code, std::string err_message)
-    : code_(code), message_(std::move(err_message)) {
+
+/** @brief 构造 Status 对象，携带错误码与描述信息 */
+Status::Status(int code, std::string err_message) : code_(code), message_(std::move(err_message)) {
 }
 
 Status& Status::operator=(int code) {
@@ -46,7 +56,11 @@ void Status::set_err_msg(const std::string& err_msg) {
     message_ = err_msg;
 }
 
+// -----------------------------------------------------------------------
+// error 命名空间：便捷工厂函数，统一创建各类 Status 对象
+// -----------------------------------------------------------------------
 namespace error {
+/** @brief 成功状态 */
 Status Success(const std::string& err_msg) {
     return Status{kSuccess, err_msg};
 }

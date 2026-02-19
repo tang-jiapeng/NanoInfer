@@ -1,9 +1,25 @@
+/**
+ * @file argmax_kernel.cpp
+ * @brief CPU Batched Argmax 算子
+ *
+ * 对每一行（batch）使用 std::max_element 查找 Logits 中最大值的索引。
+ * 输入: [batch_size, vocab_size]，输出: [batch_size] (Int32)。
+ */
 #include <algorithm>
 #include <cfloat>
 #include "../kernel_registry.h"
 
 namespace kernel {
 
+/**
+ * @brief CPU Batched Argmax
+ *
+ * 对每行使用 std::max_element 查找最大值索引。
+ *
+ * @param input   输入 Tensor [batch_size, vocab_size]，Float32，CPU 设备
+ * @param output  输出 Tensor [batch_size]，Int32，存储每行的 argmax 索引
+ * @param stream  未使用
+ */
 void argmax_kernel_cpu(const tensor::Tensor& input, const tensor::Tensor& output,
                        [[maybe_unused]] void* stream) {
     CHECK(input.device_type() == base::DeviceType::kDeviceCPU);

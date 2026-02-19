@@ -131,11 +131,9 @@ TEST_F(CUDAAllocTest, MemcpyCPU2CUDA2CPU) {
     for (size_t i = 0; i < n; ++i) h_src[i] = float(i) * 0.5f;
 
     // H2D
-    alloc_->memcpy(h_src, d_buf, byte_size, base::MemcpyKind::kMemcpyCPU2CUDA,
-                   nullptr, true);
+    alloc_->memcpy(h_src, d_buf, byte_size, base::MemcpyKind::kMemcpyCPU2CUDA, nullptr, true);
     // D2H
-    alloc_->memcpy(d_buf, h_dst, byte_size, base::MemcpyKind::kMemcpyCUDA2CPU,
-                   nullptr, true);
+    alloc_->memcpy(d_buf, h_dst, byte_size, base::MemcpyKind::kMemcpyCUDA2CPU, nullptr, true);
 
     for (size_t i = 0; i < n; ++i) {
         EXPECT_FLOAT_EQ(h_dst[i], float(i) * 0.5f) << "index " << i;

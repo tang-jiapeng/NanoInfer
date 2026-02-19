@@ -1,3 +1,14 @@
+/**
+ * @file kv_cache_manager.cpp
+ * @brief KV Cache 统一管理器实现（显存分配 + Block 映射 + 序列生命周期）
+ *
+ * KVCacheManager 组合 BlockManager 和 BlockTable，提供序列级别的 KV Cache 操作：
+ *   - init()：为所有层分配 Key/Value Cache Tensor
+ *     Shape: [num_blocks, num_kv_heads, block_size, head_size] × 2 × num_layers
+ *   - allocate_sequence()：计算需要的 Block 数 → BlockManager 分配 → BlockTable 注册
+ *   - extend_sequence()：追加 Token 时按需扩展 Block
+ *   - free_sequence()：释放并归还 Block
+ */
 #include "nanoinfer/engine/kv_cache_manager.h"
 
 namespace engine {
@@ -22,6 +33,12 @@ KVCacheManager::KVCacheManager(int32_t num_blocks, int32_t block_size, int32_t n
     LOG(INFO) << "  Head size: " << head_size;
 }
 
+/**
+ * @brief 初始化 KV Cache 显存
+ *
+ * 为每一层分配 Key/Value Cache Tensor，Shape 均为
+ * [num_blocks, num_kv_heads, block_size, head_size]，共 num_layers × 2 个 Tensor。
+ */
 base::Status KVCacheManager::init(std::shared_ptr<base::DeviceAllocator> allocator) {
     if (initialized_) {
         return base::error::InvalidArgument("KVCacheManager is already initialized");
@@ -32,8 +49,7 @@ base::Status KVCacheManager::init(std::shared_ptr<base::DeviceAllocator> allocat
 
     // 计算总显存占用
     // Shape: [num_blocks, num_kv_heads, block_size, head_size]
-    size_t elements_per_block =
-        static_cast<size_t>(num_kv_heads_) * block_size_ * head_size_;
+    size_t elements_per_block = static_cast<size_t>(num_kv_heads_) * block_size_ * head_size_;
     size_t elements_per_layer = elements_per_block * num_blocks_;
     size_t bytes_per_layer = elements_per_layer * sizeof(float);
     size_t total_bytes = bytes_per_layer * num_layers_ * 2;  // Key + Value
@@ -58,8 +74,8 @@ base::Status KVCacheManager::init(std::shared_ptr<base::DeviceAllocator> allocat
         tensor::Tensor v_cache(base::DataType::kDataTypeFp32, num_blocks_, num_kv_heads_,
                                block_size_, head_size_, true, allocator);
         if (v_cache.ptr<float>() == nullptr) {
-            return base::error::InternalError(
-                "Failed to allocate Value Cache for layer " + std::to_string(i));
+            return base::error::InternalError("Failed to allocate Value Cache for layer " +
+                                              std::to_string(i));
         }
         value_caches_.push_back(std::move(v_cache));
     }
@@ -69,6 +85,12 @@ base::Status KVCacheManager::init(std::shared_ptr<base::DeviceAllocator> allocat
     return base::error::Success();
 }
 
+/**
+ * @brief 为新序列分配 KV Cache Block
+ *
+ * 流程：计算 Block 数 → BlockManager 分配物理 Block → BlockTable 注册映射。
+ * 失败时自动回滚已分配的 Block。
+ */
 base::Status KVCacheManager::allocate_sequence(int32_t seq_id, int32_t num_tokens) {
     if (!initialized_) {
         return base::error::InvalidArgument("KVCacheManager is not initialized");
@@ -103,6 +125,11 @@ base::Status KVCacheManager::allocate_sequence(int32_t seq_id, int32_t num_token
     return base::error::Success();
 }
 
+/**
+ * @brief 扩展已有序列的 KV Cache（追加 Token 时按需分配新 Block）
+ * @param additional_tokens 新增 Token 数
+ * @param[out] num_allocated_blocks 本次实际新分配的 Block 数（可为 0）
+ */
 base::Status KVCacheManager::extend_sequence(int32_t seq_id, int32_t additional_tokens,
                                              int32_t* num_allocated_blocks) {
     if (!initialized_) {
@@ -129,8 +156,7 @@ base::Status KVCacheManager::extend_sequence(int32_t seq_id, int32_t additional_
     if (additional_blocks_needed > 0) {
         // 需要分配新 Block
         std::vector<int32_t> new_block_ids;
-        base::Status status =
-            block_manager_->allocate(additional_blocks_needed, new_block_ids);
+        base::Status status = block_manager_->allocate(additional_blocks_needed, new_block_ids);
         if (!status) {
             return status;
         }
@@ -156,6 +182,7 @@ base::Status KVCacheManager::extend_sequence(int32_t seq_id, int32_t additional_
     return base::error::Success();
 }
 
+/** @brief 释放序列的所有 KV Cache Block（BlockTable 移除 + BlockManager 归还） */
 base::Status KVCacheManager::free_sequence(int32_t seq_id) {
     if (!block_table_->has_sequence(seq_id)) {
         return base::error::InvalidArgument("Sequence " + std::to_string(seq_id) +
@@ -191,6 +218,11 @@ tensor::Tensor& KVCacheManager::get_value_cache(int32_t layer_idx) {
     return value_caches_[layer_idx];
 }
 
+/**
+ * @brief 获取指定序列集合的 Block Table Tensor（用于 GPU Kernel 输入）
+ *
+ * 调用 BlockTable::to_gpu_format 生成 [num_seqs, max_blocks_per_seq] 的 Int32 Tensor。
+ */
 base::Status KVCacheManager::get_block_table_tensor(const std::vector<int32_t>& seq_ids,
                                                     tensor::Tensor& block_table_tensor) {
     if (seq_ids.empty()) {

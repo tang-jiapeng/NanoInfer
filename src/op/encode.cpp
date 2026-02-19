@@ -1,7 +1,17 @@
+/**
+ * @file encode.cpp
+ * @brief SentencePiece 编解码层实现（SpeEncodeLayer）
+ *
+ * 封装 Google SentencePiece 库，提供：
+ *   - encode()  : 字符串 → Token ID 序列（可选添加 BOS/EOS）
+ *   - decode()  : Token ID → 字符串
+ *   - vocab_size() / bos_id() / eos_id() : 词表信息查询
+ */
 #include "nanoinfer/op/encode.h"
 
 namespace op {
 
+/** @brief 构造并加载 SentencePiece 模型文件 */
 SpeEncodeLayer::SpeEncodeLayer(std::string token_model_path, bool has_bos, bool has_eos)
     : EncodeLayerBase(std::move(token_model_path), has_bos, has_eos) {
     using namespace sentencepiece::util;
@@ -24,6 +34,7 @@ std::string SpeEncodeLayer::decode(const std::vector<int32_t>& token_ids) const 
     return this->spe->DecodeIds(token_ids);
 }
 
+/** @brief 编码：字符串 → Token ID 序列（可选添加 BOS/EOS） */
 std::vector<int32_t> SpeEncodeLayer::encode(const std::string& sentence) const {
     CHECK(spe != nullptr);
     // sentencepiece

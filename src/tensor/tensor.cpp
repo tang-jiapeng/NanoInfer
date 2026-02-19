@@ -1,3 +1,17 @@
+/**
+ * @file tensor.cpp
+ * @brief 多维张量类实现
+ *
+ * Tensor 是 NanoInfer 中最核心的数据结构，封装 N 维数组及其元数据：
+ *   - 维度信息（dims_）、数据类型（data_type_）、设备类型（device_type_）
+ *   - 底层内存由 Buffer 持有（支持 CPU 和 CUDA）
+ *
+ * 主要功能：
+ *   1. 多种构造函数：1D ~ 4D 快捷构造 + 通用 dims 向量构造
+ *   2. 设备迁移：to_cuda() / to_cpu() 在 CPU 和 GPU 间透明搬运数据
+ *   3. 内存管理：allocate()、reshape()、clone()（深拷贝）
+ *   4. 辅助工具：strides() 计算、data_type_size() 类型字节数
+ */
 #include "nanoinfer/tensor/tensor.h"
 #include <cuda_device_runtime_api.h>
 #include <cuda_runtime.h>
@@ -5,6 +19,8 @@
 #include <numeric>
 
 namespace tensor {
+
+/** @brief 辅助：对迭代器范围内的整数做乘法归约，用于计算元素总数 */
 template <typename T, typename Tp>
 static size_t reduce_dimension(T begin, T end, Tp init) {
     if (begin >= end) {
@@ -14,6 +30,7 @@ static size_t reduce_dimension(T begin, T end, Tp init) {
     return size;
 }
 
+/** @brief 返回指定 DataType 的字节数（FP32=4, Int8=1, Int32=4） */
 static size_t data_type_size(base::DataType data_type) {
     switch (data_type) {
         case base::DataType::kDataTypeFp32: {
@@ -32,6 +49,10 @@ static size_t data_type_size(base::DataType data_type) {
     }
 }
 
+// -----------------------------------------------------------------------
+// 构造函数系列：1D ~ 4D 快捷构造 + 通用 dims 构造
+// need_alloc=true 时立即分配内存，否则仅设置元信息（可传入外部 ptr）
+// -----------------------------------------------------------------------
 Tensor::Tensor(base::DataType data_type, int32_t dim0, bool need_alloc,
                std::shared_ptr<base::DeviceAllocator> alloc, void* ptr)
     : data_type_(data_type) {
@@ -61,8 +82,8 @@ Tensor::Tensor(base::DataType data_type, int32_t dim0, int32_t dim1, bool need_a
     }
 }
 
-Tensor::Tensor(base::DataType data_type, int32_t dim0, int32_t dim1, int32_t dim2,
-               bool need_alloc, std::shared_ptr<base::DeviceAllocator> alloc, void* ptr)
+Tensor::Tensor(base::DataType data_type, int32_t dim0, int32_t dim1, int32_t dim2, bool need_alloc,
+               std::shared_ptr<base::DeviceAllocator> alloc, void* ptr)
     : data_type_(data_type) {
     dims_.push_back(dim0);
     dims_.push_back(dim1);
@@ -75,9 +96,8 @@ Tensor::Tensor(base::DataType data_type, int32_t dim0, int32_t dim1, int32_t dim
     }
 }
 
-Tensor::Tensor(base::DataType data_type, int32_t dim0, int32_t dim1, int32_t dim2,
-               int32_t dim3, bool need_alloc,
-               std::shared_ptr<base::DeviceAllocator> alloc, void* ptr)
+Tensor::Tensor(base::DataType data_type, int32_t dim0, int32_t dim1, int32_t dim2, int32_t dim3,
+               bool need_alloc, std::shared_ptr<base::DeviceAllocator> alloc, void* ptr)
     : data_type_(data_type) {
     dims_.push_back(dim0);
     dims_.push_back(dim1);
@@ -102,6 +122,12 @@ Tensor::Tensor(base::DataType data_type, std::vector<int32_t> dims, bool need_al
     }
 }
 
+/**
+ * @brief 将当前 Tensor 迁移到 CUDA 设备
+ *
+ * 分配新的 CUDA Buffer，将数据从 CPU 拷贝到 GPU，替换底层 buffer_。
+ * 若已在 CUDA 上则跳过。支持传入 stream 实现异步拷贝。
+ */
 void Tensor::to_cuda(cudaStream_t stream) {
     CHECK_NE(buffer_, nullptr);
     const base::DeviceType device_type = this->device_type();
@@ -119,6 +145,7 @@ void Tensor::to_cuda(cudaStream_t stream) {
     }
 }
 
+/** @brief 将当前 Tensor 迁移到 CPU（分配 CPU Buffer + cudaMemcpy D2H） */
 void Tensor::to_cpu() {
     CHECK_NE(buffer_, nullptr);
     const base::DeviceType device_type = this->device_type();
@@ -175,8 +202,13 @@ bool Tensor::assign(std::shared_ptr<base::Buffer> buffer) {
     return true;
 }
 
-bool Tensor::allocate(std::shared_ptr<base::DeviceAllocator> allocator,
-                      bool need_realloc) {
+/**
+ * @brief 分配或重新分配底层 Buffer
+ *
+ * 若已有 Buffer 且大小足够且 need_realloc=false，则复用现有内存。
+ * 否则创建新的 Buffer 并由 allocator 分配内存。
+ */
+bool Tensor::allocate(std::shared_ptr<base::DeviceAllocator> allocator, bool need_realloc) {
     if (!allocator) {
         LOG(ERROR) << "The allocator parameter in the allocate function is null "
                       "pointer!";
@@ -185,8 +217,7 @@ bool Tensor::allocate(std::shared_ptr<base::DeviceAllocator> allocator,
 
     size_t byte_size = this->byte_size();
     if (!byte_size) {
-        LOG(ERROR)
-            << "The byte_size parameter in the allocate function is equal to zero!";
+        LOG(ERROR) << "The byte_size parameter in the allocate function is equal to zero!";
         return false;
     }
 
@@ -229,6 +260,9 @@ base::DataType Tensor::data_type() const {
     return data_type_;
 }
 
+/**
+ * @brief 重新设置维度，若新尺寸超出当前 Buffer 则自动扩容（保留原数据）
+ */
 void Tensor::reshape(const std::vector<int32_t>& dims) {
     size_t size = reduce_dimension(dims.begin(), dims.end(), 1);
     if (!buffer_) {
@@ -252,6 +286,7 @@ std::shared_ptr<base::Buffer> Tensor::get_buffer() const {
     return buffer_;
 }
 
+/** @brief 深拷贝：创建新的 Tensor，包含独立的 Buffer 副本 */
 Tensor Tensor::clone() const {
     Tensor new_tensor = *this;
     size_t byte_size = this->byte_size();
@@ -266,6 +301,7 @@ size_t Tensor::byte_size() const {
     return this->size() * DataTypeSize(data_type_);
 }
 
+/** @brief 计算各维度的步长（行主序，最后一维 stride = 1） */
 std::vector<size_t> Tensor::strides() const {
     std::vector<size_t> strides;
     if (!dims_.empty()) {
@@ -282,11 +318,17 @@ bool Tensor::is_empty() const {
     return size_ == 0 || buffer_ == nullptr || buffer_->ptr() == nullptr;
 }
 
-void Tensor::init_buffer(std::shared_ptr<base::DeviceAllocator> alloc,
-                         base::DataType data_type, bool need_alloc, void* ptr) {
+/**
+ * @brief 初始化 Buffer（内部辅助）
+ *
+ * 若未提供 allocator 且不需要分配，则包装外部指针（external 模式）。
+ * 否则通过 allocator 分配新内存。
+ */
+void Tensor::init_buffer(std::shared_ptr<base::DeviceAllocator> alloc, base::DataType data_type,
+                         bool need_alloc, void* ptr) {
     if (!alloc && !need_alloc) {
-        std::shared_ptr<base::Buffer> buffer = std::make_shared<base::Buffer>(
-            data_type_size(data_type) * size_, nullptr, ptr, true);
+        std::shared_ptr<base::Buffer> buffer =
+            std::make_shared<base::Buffer>(data_type_size(data_type) * size_, nullptr, ptr, true);
         this->buffer_ = buffer;
     } else {
         allocate(alloc, true);

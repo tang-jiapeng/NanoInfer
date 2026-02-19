@@ -1,3 +1,19 @@
+/**
+ * @file model.cpp
+ * @brief Model 基类实现（权重加载、Tokenizer 初始化、模型配置解析）
+ *
+ * Model 是所有具体模型（如 LLaMA）的基类，提供通用的初始化流水线：
+ *
+ *   gen_model_from_file()
+ *     │
+ *     ├─ read_model_file()       : 打开文件 → fread ModelConfig → mmap 整个文件
+ *     ├─ generate_model_infos()  : 从 ModelConfig 推导 kv_dim / kv_mul / head_size 等
+ *     ├─ create_encode_layer()   : 创建 SentencePiece Tokenizer，获取 vocab_size
+ *     └─ create_layers()         : 纯虚函数，由子类实现各网络层的创建
+ *
+ * 权重文件通过 mmap 映射到内存，避免一次性加载全部参数。
+ * 支持 FP32 和 Int8 量化模型格式（通过 is_quant_model_ 区分）。
+ */
 #include "nanoinfer/model/model.h"
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -27,6 +43,14 @@ const std::string& Model::model_path() const {
     return model_path_;
 }
 
+/**
+ * @brief 读取并 mmap 模型权重文件
+ *
+ * 流程：
+ *   1. open 文件 → fread 读取头部 ModelConfig 结构体
+ *   2. 量化模型额外读取 group_size
+ *   3. mmap 整个文件到内存，设置 weight_data 指向头部之后的偏移
+ */
 base::Status Model::read_model_file() {
     using namespace base;
     if (model_path_.empty()) {
@@ -100,6 +124,13 @@ base::Status Model::read_model_file() {
     return error::Success();
 }
 
+/**
+ * @brief 从 ModelConfig 推导 Transformer 架构参数
+ *
+ * 派生参数：kv_dim = dim * kv_head_num / head_num，
+ * kv_mul = head_num / kv_head_num（GQA 倍数），head_size = dim / head_num。
+ * vocab_size 为负值表示不共享 Embedding 与 Classifier 权重。
+ */
 base::Status Model::generate_model_infos(const ModelConfig& config) const {
     config_->dim_ = config.dim;
     config_->hidden_dim_ = config.hidden_dim;
@@ -126,6 +157,7 @@ base::Status Model::generate_model_infos(const ModelConfig& config) const {
     return base::error::Success();
 }
 
+/** @brief 创建 Tokenizer（SentencePiece），并从中获取 vocab_size / bos_id / eos_id */
 base::Status Model::create_encode_layer() {
     using namespace base;
 
@@ -153,6 +185,11 @@ base::Status Model::create_encode_layer() {
     return error::Success();
 }
 
+/**
+ * @brief 模型初始化主流程：mmap + Tokenizer + 网络层创建
+ *
+ * 调用顺序：read_model_file() → create_encode_layer() → create_layers()
+ */
 base::Status Model::gen_model_from_file() {
     using namespace base;
     config_ = std::make_unique<TransformerConfig>();
@@ -164,8 +201,6 @@ base::Status Model::gen_model_from_file() {
         return mmap_status;
     }
 
-    // init sentence piece processor
-    // google sentence piece
     auto create_encode_status = create_encode_layer();
     if (!create_encode_status) {
         LOG(ERROR) << "Create the encode layer failed!";

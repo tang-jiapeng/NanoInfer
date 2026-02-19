@@ -1,3 +1,15 @@
+/**
+ * @file prefill_attention_kernel.cpp
+ * @brief CPU Prefill Attention 算子（分块预填充）
+ *
+ * 适用于 Prefill 阶段的分块 Attention 计算：
+ *   Step 0: 将当前 Chunk 的 K/V 写入 Paged Cache
+ *   Step 1: Q @ K^T（遍历 [0, context_len) 的所有历史 Token）
+ *   Step 2: Softmax with Causal Mask（只看到当前位置及之前）
+ *   Step 3: Weighted sum of V → Output
+ *
+ * 支持 GQA：Query 头数可为 KV 头数的整数倍。
+ */
 #include <cfloat>
 #include <cmath>
 #include <cstring>
@@ -6,6 +18,32 @@
 
 namespace kernel {
 
+/**
+ * @brief CPU Prefill Attention（分块预填充）
+ *
+ * 完整的 4 步流程：
+ *   Step 0: 将当前 chunk 的 K/V 写入 Paged Cache
+ *   Step 1: Q @ K^T → scores（遍历 [0, context_len) 的所有历史 Token）
+ *   Step 2: Causal Softmax（绝对位置 = start_pos + i，只看 [0, start_pos+i]）
+ *   Step 3: 加权求和 V → Output
+ *
+ * 支持 GQA：多个 Q Head 共享同一个 KV Head，通过 heads_per_kv 映射。
+ *
+ * @param query        当前 chunk 的 Query [chunk_len, num_heads × head_size]
+ * @param key          当前 chunk 的 Key [chunk_len, num_kv_heads × head_size]
+ * @param value        当前 chunk 的 Value，shape 同 key
+ * @param output       输出 Tensor，shape 同 query
+ * @param k_cache      Key Cache [num_blocks, block_size, num_kv_heads, head_size]
+ * @param v_cache      Value Cache，布局同 k_cache
+ * @param block_table  Block Table [1, max_blocks_per_seq]（单序列 Prefill）
+ * @param positions    每个 Token 的绝对位置 [chunk_len]，Int32
+ * @param num_heads    Q Head 数
+ * @param num_kv_heads KV Head 数
+ * @param head_size    单个 Head 维度
+ * @param block_size   物理 Block 容量
+ * @param context_len  包含当前 chunk 在内的总上下文长度
+ * @param stream       未使用
+ */
 void prefill_attention_kernel_cpu(const tensor::Tensor& query, const tensor::Tensor& key,
                                   const tensor::Tensor& value, const tensor::Tensor& output,
                                   const tensor::Tensor& k_cache, const tensor::Tensor& v_cache,

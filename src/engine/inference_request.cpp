@@ -1,3 +1,13 @@
+/**
+ * @file inference_request.cpp
+ * @brief 推理请求生命周期管理
+ *
+ * InferenceRequest 跟踪一条推理请求从提交到完成的全过程：
+ *   - 状态机：Waiting → Running → Finished（可被 Preempt 再 Resume）
+ *   - Prefill 支持：get_next_chunk_tokens/positions 实现 Chunked Prefill
+ *   - Decode 支持：add_token 逐 Token 生成，检查 EOS / 最大长度停止条件
+ *   - 延迟统计：latency_seconds / execution_time_seconds
+ */
 #include "nanoinfer/engine/inference_request.h"
 
 namespace engine {
@@ -16,6 +26,7 @@ void InferenceRequest::set_state(RequestState state) {
     state_ = state;
 }
 
+/** @brief 开始执行，状态 Waiting → Running，首次调用时记录 start_time */
 void InferenceRequest::start_running() {
     state_ = RequestState::kRunning;
     // 如果是第一次运行，记录开始时间
@@ -37,6 +48,10 @@ void InferenceRequest::resume() {
     state_ = RequestState::kWaiting;
 }
 
+/**
+ * @brief 添加生成的 Token 并检查停止条件
+ * @return true = 继续生成，false = 已完成（遇 EOS 或达到最大长度）
+ */
 bool InferenceRequest::add_token(int32_t token, int32_t eos_token_id) {
     generated_tokens_.push_back(token);
 
@@ -54,6 +69,12 @@ void InferenceRequest::add_computed_tokens(int32_t count) {
     num_computed_tokens_ += count;
 }
 
+/**
+ * @brief 获取下一步要处理的 Token
+ *
+ * Prefill 阶段：返回 Prompt 中下一个未计算的 Token。
+ * Decode 阶段：返回上一步生成的 Token（自回归）。
+ */
 int32_t InferenceRequest::next_token() const {
     if (is_prefill()) {
         // Prefill 阶段：下一个要计算的是 Prompt 中的 token
@@ -70,6 +91,12 @@ int32_t InferenceRequest::next_token() const {
     }
 }
 
+/**
+ * @brief 获取下一个 Chunk 的 Token 序列（支持 Chunked Prefill）
+ *
+ * Prefill: 返回 min(chunk_size, 剩余未计算) 个 Token。
+ * Decode: 返回 1 个 Token（自回归）。
+ */
 std::vector<int32_t> InferenceRequest::get_next_chunk_tokens(int32_t chunk_size) const {
     std::vector<int32_t> tokens;
 
@@ -94,6 +121,11 @@ std::vector<int32_t> InferenceRequest::get_next_chunk_tokens(int32_t chunk_size)
     return tokens;
 }
 
+/**
+ * @brief 获取下一个 Chunk 的绝对位置索引（用于 RoPE）
+ *
+ * 位置 = num_computed_tokens + 偏移量，保证多次 Chunk 的位置连续。
+ */
 std::vector<int32_t> InferenceRequest::get_next_chunk_positions(int32_t chunk_size) const {
     std::vector<int32_t> positions;
 
