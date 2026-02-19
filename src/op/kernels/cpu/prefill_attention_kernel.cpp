@@ -1,8 +1,8 @@
-#include "prefill_attention_kernel.h"
 #include <cfloat>
 #include <cmath>
 #include <cstring>
 #include <vector>
+#include "../kernel_registry.h"
 
 namespace kernel {
 
@@ -12,7 +12,7 @@ void prefill_attention_kernel_cpu(const tensor::Tensor& query, const tensor::Ten
                                   const tensor::Tensor& block_table,
                                   const tensor::Tensor& positions, int32_t num_heads,
                                   int32_t num_kv_heads, int32_t head_size, int32_t block_size,
-                                  int32_t context_len) {
+                                  int32_t context_len, [[maybe_unused]] void* stream) {
     int32_t chunk_len = static_cast<int32_t>(query.get_dim(0));
     int32_t kv_dim = num_kv_heads * head_size;
     int32_t start_pos = context_len - chunk_len;
@@ -119,5 +119,7 @@ void prefill_attention_kernel_cpu(const tensor::Tensor& query, const tensor::Ten
         }
     }
 }
+
+REGISTER_KERNEL(prefill_attention, kDeviceCPU, prefill_attention_kernel_cpu)
 
 }  // namespace kernel

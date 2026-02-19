@@ -1,5 +1,5 @@
-#include "paged_kv_write_kernel.h"
 #include <cstring>
+#include "../kernel_registry.h"
 
 namespace kernel {
 
@@ -7,9 +7,7 @@ void paged_kv_write_kernel_cpu(const tensor::Tensor& k, const tensor::Tensor& v,
                                const tensor::Tensor& k_cache, const tensor::Tensor& v_cache,
                                const tensor::Tensor& block_table, const tensor::Tensor& input_pos,
                                int32_t num_kv_heads, int32_t head_size, int32_t block_size,
-                               void* stream) {
-    UNUSED(stream);
-
+                               [[maybe_unused]] void* stream) {
     int32_t batch_size = static_cast<int32_t>(k.get_dim(0));
     int32_t max_blocks_per_seq = static_cast<int32_t>(block_table.get_dim(1));
 
@@ -43,5 +41,7 @@ void paged_kv_write_kernel_cpu(const tensor::Tensor& k, const tensor::Tensor& v,
         }
     }
 }
+
+REGISTER_KERNEL(paged_kv_write, kDeviceCPU, paged_kv_write_kernel_cpu)
 
 }  // namespace kernel

@@ -1,7 +1,6 @@
 #include "nanoinfer/op/paged_attention.h"
-#include "kernels/cpu/prefill_attention_kernel.h"
-#include "kernels/cuda/prefill_attention_kernel.cuh"
-#include "kernels/kernels_interface.h"
+#include "kernels/kernel_registry.h"
+#include "kernels/kernel_types.h"
 
 namespace op {
 PagedAttention::PagedAttention(base::DeviceType device_type, int32_t layer_index, int32_t kv_mul,
@@ -36,11 +35,6 @@ base::Status PagedAttention::check() const {
         return base::Status(base::StatusCode::kInvalidArgument,
                             "RoPE Cache not set in PagedAttention");
     }
-    return base::error::Success();
-}
-
-base::Status PagedAttention::init() {
-    // CPU 和 CUDA 均已支持
     return base::error::Success();
 }
 
@@ -79,8 +73,9 @@ base::Status PagedAttention::forward() {
 
     auto& output = get_output(0);
 
-    // 获取 CUDA 流
-    void* cuda_stream = cuda_config_ ? cuda_config_->stream : nullptr;
+    if (device_type_ == base::DeviceType::kDeviceCUDA) {
+        CHECK(cuda_config_ != nullptr);
+    }
 
     // 计算辅助参数
     int32_t q_dim = head_num_ * head_size_;
@@ -89,57 +84,58 @@ base::Status PagedAttention::forward() {
     // ==========================================================================
     // Step 1: RoPE (Rotary Positional Embeddings)
     // ==========================================================================
-    kernel::RoPEKernel rope_kernel = kernel::get_rope_kernel(device_type_);
+    auto rope_kernel =
+        kernel::KernelRegistry::instance().get<kernel::RoPEKernelFn>("rope", device_type_);
     if (!rope_kernel) {
-        return base::Status(base::StatusCode::kFunctionUnImplement, "RoPE kernel missing");
+        return base::error::InternalError("RoPE kernel not found for device: " +
+                                          std::to_string(static_cast<int>(device_type_)));
     }
-
     rope_kernel(q_dim, kv_dim_, head_size_, query, key, input_pos, sin_cache_, cos_cache_,
-                cuda_stream);
+                cuda_config_ ? cuda_config_->stream : nullptr);
 
     // ==========================================================================
     // Prefill vs Decode 分支
     // ==========================================================================
     if (is_prefill_) {
-        if (device_type_ == base::DeviceType::kDeviceCUDA) {
-            // ---- CUDA: Chunked Prefill via cuBLAS + Gather ----
-            kernel::prefill_attention_kernel(query, key, value, output, key_cache_, value_cache_,
-                                             block_table, input_pos, head_num_, num_kv_heads,
-                                             head_size_, block_size_, context_len_,
-                                             cuda_config_ ? cuda_config_.get() : nullptr);
-        } else {
-            // ---- CPU: Chunked Prefill via loops ----
-            kernel::prefill_attention_kernel_cpu(
-                query, key, value, output, key_cache_, value_cache_, block_table, input_pos,
-                head_num_, num_kv_heads, head_size_, block_size_, context_len_);
+        auto prefill_attention_kernel =
+            kernel::KernelRegistry::instance().get<kernel::PrefillAttentionKernelFn>(
+                "prefill_attention", device_type_);
+        if (!prefill_attention_kernel) {
+            return base::error::InternalError("PrefillAttention kernel not found for device: " +
+                                              std::to_string(static_cast<int>(device_type_)));
         }
+        prefill_attention_kernel(query, key, value, output, key_cache_, value_cache_, block_table,
+                                 input_pos, head_num_, num_kv_heads, head_size_, block_size_,
+                                 context_len_, cuda_config_ ? cuda_config_.get() : nullptr);
     } else {
         // ---- Decode: Paged Attention (单 token 查询) ----
 
         // Step 2: KV Cache Write
-        kernel::PagedKVWriteKernel kv_write_kernel =
-            kernel::get_paged_kv_write_kernel(device_type_);
+        auto kv_write_kernel = kernel::KernelRegistry::instance().get<kernel::PagedKVWriteKernelFn>(
+            "paged_kv_write", device_type_);
         if (!kv_write_kernel) {
-            return base::Status(base::StatusCode::kFunctionUnImplement,
-                                "PagedKVWrite kernel missing");
+            return base::error::InternalError("PagedKVWrite kernel not found for device: " +
+                                              std::to_string(static_cast<int>(device_type_)));
         }
         kv_write_kernel(key, value, key_cache_, value_cache_, block_table, input_pos, num_kv_heads,
-                        head_size_, block_size_, cuda_stream);
+                        head_size_, block_size_, cuda_config_ ? cuda_config_->stream : nullptr);
 
         // Step 3: Paged Attention
-        kernel::PagedAttentionKernel pa_kernel = kernel::get_paged_attention_kernel(device_type_);
-        if (!pa_kernel) {
-            return base::Status(base::StatusCode::kFunctionUnImplement,
-                                "PagedAttention kernel missing");
+        auto paged_attention_kernel =
+            kernel::KernelRegistry::instance().get<kernel::PagedAttentionKernelFn>(
+                "paged_attention", device_type_);
+        if (!paged_attention_kernel) {
+            return base::error::InternalError("PagedAttention kernel not found for device: " +
+                                              std::to_string(static_cast<int>(device_type_)));
         }
 
         float scale = 1.0f / std::sqrt(static_cast<float>(head_size_));
         int32_t max_blocks_per_seq = static_cast<int32_t>(block_table.get_dim(1));
         int32_t max_context_len_estimate = max_blocks_per_seq * block_size_;
 
-        pa_kernel(query, output, key_cache_, value_cache_, block_table, context_lens,
-                  max_context_len_estimate, head_num_, num_kv_heads, head_size_, block_size_, scale,
-                  cuda_stream);
+        paged_attention_kernel(query, output, key_cache_, value_cache_, block_table, context_lens,
+                               max_context_len_estimate, head_num_, num_kv_heads, head_size_,
+                               block_size_, scale, cuda_config_ ? cuda_config_->stream : nullptr);
     }
 
     return base::error::Success();

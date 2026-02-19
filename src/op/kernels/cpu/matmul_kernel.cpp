@@ -1,11 +1,10 @@
-#include "matmul_kernel.h"
-#include "../kernels_interface.h"
-#include "nanoinfer/base/base.h"
+#include <armadillo>
+#include "../kernel_registry.h"
 
 namespace kernel {
 void matmul_kernel_cpu(const tensor::Tensor& input, const tensor::Tensor& weight,
-                       const tensor::Tensor& output, float scale, const CudaConfig* config) {
-    UNUSED(config);
+                       const tensor::Tensor& output, const float scale,
+                       [[maybe_unused]] void* stream) {
     CHECK(!input.is_empty());
     CHECK(!weight.is_empty());
     CHECK(!output.is_empty());
@@ -53,4 +52,7 @@ void matmul_kernel_cpu(const tensor::Tensor& input, const tensor::Tensor& weight
 
     out_mat = (wei_mat.t() * in_mat) * scale;
 }
+
+REGISTER_KERNEL(matmul, kDeviceCPU, matmul_kernel_cpu)
+
 }  // namespace kernel

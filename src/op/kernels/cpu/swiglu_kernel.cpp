@@ -1,10 +1,9 @@
-#include "swiglu_kernel.h"
 #include <armadillo>
+#include "../kernel_registry.h"
 
 namespace kernel {
 void swiglu_kernel_cpu(const tensor::Tensor& input1, const tensor::Tensor& input2,
-                       const tensor::Tensor& output, void* stream) {
-    UNUSED(stream);
+                       const tensor::Tensor& output, [[maybe_unused]] void* stream) {
     CHECK_EQ(input1.is_empty(), false);
     CHECK_EQ(input2.is_empty(), false);
     CHECK_EQ(output.is_empty(), false);
@@ -19,4 +18,6 @@ void swiglu_kernel_cpu(const tensor::Tensor& input1, const tensor::Tensor& input
 
     output_vec = (input1_vec % (1.0f / (1.0f + arma::exp(-input1_vec)))) % input2_vec;
 }
+
+REGISTER_KERNEL(swiglu, kDeviceCPU, swiglu_kernel_cpu)
 }  // namespace kernel

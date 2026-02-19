@@ -1,9 +1,10 @@
-#include "embedding_kernel.h"
+#include "../kernel_registry.h"
 
 namespace kernel {
 
 void embedding_kernel_cpu(const tensor::Tensor& input, const tensor::Tensor& weight,
-                          const tensor::Tensor& output, int32_t vocab_size, void* stream) {
+                          const tensor::Tensor& output, int32_t vocab_size,
+                          [[maybe_unused]] void* stream) {
     CHECK(!input.is_empty());
     CHECK(!weight.is_empty());
     const int32_t input_num = static_cast<int32_t>(input.size());
@@ -28,5 +29,7 @@ void embedding_kernel_cpu(const tensor::Tensor& input, const tensor::Tensor& wei
         }
     }
 }
+
+REGISTER_KERNEL(embedding, kDeviceCPU, embedding_kernel_cpu)
 
 }  // namespace kernel

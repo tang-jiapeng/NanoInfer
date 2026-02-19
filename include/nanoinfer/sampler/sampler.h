@@ -50,7 +50,6 @@ class Sampler {
      */
     virtual void sample_batched(const tensor::Tensor& logits, tensor::Tensor& output_ids,
                                 void* stream = nullptr) {
-        // 默认实现：如果子类没实现高效 Batch 版本，fallback 到循环调用 sample
         LOG(ERROR) << "sample_batched not implemented for this sampler";
     }
 

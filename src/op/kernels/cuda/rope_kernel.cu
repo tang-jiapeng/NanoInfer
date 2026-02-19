@@ -1,4 +1,4 @@
-#include "rope_kernel.cuh"
+#include "../kernel_registry.h"
 
 namespace kernel {
 // Device 函数：执行旋转计算
@@ -96,7 +96,6 @@ __global__ void sin_cos_calc_kernel(int head_size, int max_seq_len,
   cos_cache[idx] = cosf(val);
 }
 
-// Host 调用函数
 void sin_cos_cache_calc_cu(int head_size, int max_seq_len,
                            const tensor::Tensor& sin_cache,
                            const tensor::Tensor& cos_cache, void* stream) {
@@ -145,4 +144,8 @@ void rope_kernel_cu(int32_t dim, int32_t kv_dim, int32_t head_size,
       input_k.ptr<float>(), input_pos.ptr<int32_t>(), sin_cache.ptr<float>(),
       cos_cache.ptr<float>());
 }
+
+REGISTER_KERNEL(rope, kDeviceCUDA, rope_kernel_cu);
+REGISTER_KERNEL(sin_cos_cache_calc, kDeviceCUDA, sin_cos_cache_calc_cu);
+
 }

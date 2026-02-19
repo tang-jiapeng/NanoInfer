@@ -1,6 +1,6 @@
 #include <cuda_runtime.h>
 #include <cub/block/block_reduce.cuh>
-#include "rmsnorm_kernel.cuh"
+#include "../kernel_registry.h"
 
 namespace kernel {
 
@@ -105,5 +105,7 @@ void rmsnorm_kernel_cu(const tensor::Tensor& input, const tensor::Tensor& weight
     row_rmsnorm_f32<threads_per_block><<<grid, block, 0, stream_>>>(
         input.ptr<float>(), weight.ptr<float>(), const_cast<float*>(output.ptr<float>()), hidden_dim, eps);
 }
+
+REGISTER_KERNEL(rmsnorm, kDeviceCUDA, rmsnorm_kernel_cu);
 
 }  // namespace kernel

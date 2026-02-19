@@ -1,10 +1,9 @@
-#include "rmsnorm_kernel.h"
 #include <armadillo>
+#include "../kernel_registry.h"
 
 namespace kernel {
 void rmsnorm_kernel_cpu(const tensor::Tensor& input, const tensor::Tensor& weight,
-                        const tensor::Tensor& output, void* stream) {
-    UNUSED(stream);
+                        const tensor::Tensor& output, [[maybe_unused]] void* stream) {
     CHECK(!input.is_empty());
     CHECK(!weight.is_empty());
     CHECK(!output.is_empty());
@@ -62,4 +61,7 @@ void rmsnorm_kernel_cpu(const tensor::Tensor& input, const tensor::Tensor& weigh
         row_out_vec = wei_tensor % (row_in_vec * rms);
     }
 }
+
+REGISTER_KERNEL(rmsnorm, kDeviceCPU, rmsnorm_kernel_cpu)
+
 }  // namespace kernel

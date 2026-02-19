@@ -1,5 +1,6 @@
 #include "nanoinfer/op/swiglu.h"
-#include "kernels/kernels_interface.h"
+#include "kernels/kernel_registry.h"
+#include "kernels/kernel_types.h"
 
 namespace op {
 
@@ -35,14 +36,19 @@ base::Status SwiGLULayer::forward() {
     if (!status) {
         return status;
     }
-    auto input1 = this->get_input(0);
-    auto input2 = this->get_input(1);
-    auto output = this->get_output(0);
+
     if (device_type_ == base::DeviceType::kDeviceCUDA) {
         CHECK(cuda_config_ != nullptr);
     }
-    kernel::get_swiglu_kernel(device_type_)(input1, input2, output,
-                                            cuda_config_ ? cuda_config_->stream : nullptr);
+    auto swiglu_kernel =
+        kernel::KernelRegistry::instance().get<kernel::SwigluKernelFn>("swiglu", device_type_);
+    if (!swiglu_kernel) {
+        return base::error::InternalError("SwiGLU kernel not found for device: " +
+                                          std::to_string(static_cast<int>(device_type_)));
+    }
+
+    swiglu_kernel(get_input(0), get_input(1), get_output(0),
+                  cuda_config_ ? cuda_config_->stream : nullptr);
     return base::error::Success();
 }
 

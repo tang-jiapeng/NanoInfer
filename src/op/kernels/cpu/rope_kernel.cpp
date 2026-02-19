@@ -1,13 +1,12 @@
-#include "rope_kernel.h"
 #include <armadillo>
+#include "../kernel_registry.h"
 
 namespace kernel {
 
 void rope_kernel_cpu(int32_t dim, int32_t kv_dim, int32_t head_size, const tensor::Tensor& input_q,
                      const tensor::Tensor& input_k, const tensor::Tensor& input_pos,
                      const tensor::Tensor& sin_cache, const tensor::Tensor& cos_cache,
-                     void* stream) {
-    UNUSED(stream);
+                     [[maybe_unused]] void* stream) {
     CHECK(!input_q.is_empty());
     CHECK(!input_pos.is_empty());
 
@@ -62,5 +61,7 @@ void rope_kernel_cpu(int32_t dim, int32_t kv_dim, int32_t head_size, const tenso
         }
     }
 }
+
+REGISTER_KERNEL(rope, kDeviceCPU, rope_kernel_cpu)
 
 }  // namespace kernel

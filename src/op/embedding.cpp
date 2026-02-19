@@ -1,5 +1,7 @@
 #include "nanoinfer/op/embedding.h"
-#include "kernels/kernels_interface.h"
+#include "kernels/kernel_registry.h"
+#include "kernels/kernel_types.h"
+
 namespace op {
 
 EmbeddingLayer::EmbeddingLayer(base::DeviceType device_type, int32_t dim, int32_t seq_len,
@@ -47,9 +49,14 @@ base::Status EmbeddingLayer::forward() {
     if (device_type_ == base::DeviceType::kDeviceCUDA) {
         CHECK(cuda_config_ != nullptr);
     }
-    kernel::get_embedding_kernel(device_type_)(get_input(0), get_weight(0), get_output(0),
-                                               vocab_size_,
-                                               cuda_config_ ? cuda_config_->stream : nullptr);
-    return base::StatusCode::kSuccess;
+    auto embedding_kernel = kernel::KernelRegistry::instance().get<kernel::EmbeddingKernelFn>(
+        "embedding", device_type_);
+    if (!embedding_kernel) {
+        return base::error::InternalError("Embedding kernel not found for device: " +
+                                          std::to_string(static_cast<int>(device_type_)));
+    }
+    embedding_kernel(get_input(0), get_weight(0), get_output(0), vocab_size_,
+                     cuda_config_ ? cuda_config_->stream : nullptr);
+    return base::error::Success();
 }
 }  // namespace op

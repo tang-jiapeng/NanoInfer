@@ -1,5 +1,6 @@
 #include "nanoinfer/op/matmul.h"
-#include "kernels/kernels_interface.h"
+#include "kernels/kernel_registry.h"
+#include "kernels/kernel_types.h"
 
 namespace op {
 
@@ -19,7 +20,7 @@ MatmulLayer::MatmulLayer(base::DeviceType device_type, int32_t dim0, int32_t dim
 
 base::Status MatmulLayer::check() const {
     const auto& input_tensor = get_input(0);
-    
+
     // 检查是否为空
     if (input_tensor.is_empty()) {
         return base::error::InvalidArgument("The input tensor is empty.");
@@ -29,19 +30,19 @@ base::Status MatmulLayer::check() const {
         LOG(ERROR) << "The input tensor device or data type error in the matmul layer.";
         return base::error::InvalidArgument("Input tensor device/dtype mismatch");
     }
-    
+
     // 检查维度数 (至少 2D)
     if (input_tensor.dims_size() < 2) {
         LOG(ERROR) << "The input tensor dims size error (must >= 2) in the matmul layer.";
         return base::error::InvalidArgument("Input tensor dims size error");
     }
-    
+
     // 只检查最后一维 (K 维度) 是否匹配 dim1_
     // 也就是 inputs 的列数必须等于权重的输入通道数
     int32_t last_dim = input_tensor.get_dim(input_tensor.dims_size() - 1);
     if (last_dim != dim1_) {
-        LOG(ERROR) << "The input tensor last dim error in the matmul layer. Expected " 
-                   << dim1_ << " but got " << last_dim;
+        LOG(ERROR) << "The input tensor last dim error in the matmul layer. Expected " << dim1_
+                   << " but got " << last_dim;
         return base::error::InvalidArgument("Input tensor K-dimension mismatch");
     }
 
@@ -50,9 +51,10 @@ base::Status MatmulLayer::check() const {
         status = check_tensor_with_dim(get_weight(0), device_type_, data_type_, dim0_, dim1_);
     } else {
         // 量化权重通常也是固定的，可以直接查
-        status = check_tensor_with_dim(get_weight(0), device_type_, base::DataType::kDataTypeInt8, dim0_, dim1_);
+        status = check_tensor_with_dim(get_weight(0), device_type_, base::DataType::kDataTypeInt8,
+                                       dim0_, dim1_);
     }
-    
+
     if (!status) {
         LOG(ERROR) << "The weight tensor error in the matmul layer.";
         return status;
@@ -63,7 +65,8 @@ base::Status MatmulLayer::check() const {
         if (scales_.is_empty()) {
             return base::error::InvalidArgument("The scale tensor is empty.");
         }
-        if (scales_.device_type() != device_type_ || scales_.data_type() != base::DataType::kDataTypeFp32) {
+        if (scales_.device_type() != device_type_ ||
+            scales_.data_type() != base::DataType::kDataTypeFp32) {
             return base::error::InvalidArgument("The scale tensor device/dtype error.");
         }
     }
@@ -73,14 +76,14 @@ base::Status MatmulLayer::check() const {
 
     // 输出的 batch 维度 (dim0) 必须等于输入的 batch 维度
     if (output_tensor.get_dim(0) != input_tensor.get_dim(0)) {
-         LOG(ERROR) << "Output batch size does not match input batch size.";
-         return base::error::InvalidArgument("Output batch size mismatch");
+        LOG(ERROR) << "Output batch size does not match input batch size.";
+        return base::error::InvalidArgument("Output batch size mismatch");
     }
-    
+
     // 输出的最后一维必须等于 dim0_ (N 维度)
     if (output_tensor.get_dim(output_tensor.dims_size() - 1) != dim0_) {
-         LOG(ERROR) << "Output tensor last dim mismatch. Expected " << dim0_;
-         return base::error::InvalidArgument("Output tensor N-dimension mismatch");
+        LOG(ERROR) << "Output tensor last dim mismatch. Expected " << dim0_;
+        return base::error::InvalidArgument("Output tensor N-dimension mismatch");
     }
 
     return base::error::Success();
@@ -95,19 +98,27 @@ base::Status MatmulLayer::forward() {
         CHECK(cuda_config_ != nullptr);
     }
     if (is_quant_layer_) {
-        kernel::get_matmul_kernel_quant8(device_type_)(
-            get_input(0), get_weight(0), get_output(0), group_size_, scales_,
-            cuda_config_ ? cuda_config_.get() : nullptr);
+        return base::error::InternalError("Quantized matmul kernel is not implemented yet");
     } else {
-        kernel::get_matmul_kernel(device_type_)(
-            get_input(0), get_weight(0), get_output(0), 1.f,
-            cuda_config_ ? cuda_config_.get() : nullptr);
+        auto matmul_kernel =
+            kernel::KernelRegistry::instance().get<kernel::MatmulKernelFn>("matmul", device_type_);
+        if (!matmul_kernel) {
+            return base::error::InternalError("Matmul kernel not found for device: " +
+                                              std::to_string(static_cast<int>(device_type_)));
+        }
+        matmul_kernel(get_input(0), get_weight(0), get_output(0), 1.0f,
+                      cuda_config_ ? cuda_config_.get() : nullptr);
     }
 
     if (has_bias_) {
-        kernel::get_add_kernel(device_type_)(
-            get_output(0), get_bias(0), get_output(0),
-            cuda_config_ ? cuda_config_->stream : nullptr);
+        auto add_kernel =
+            kernel::KernelRegistry::instance().get<kernel::AddKernelFn>("add", device_type_);
+        if (!add_kernel) {
+            return base::error::InternalError("Add kernel not found for device: " +
+                                              std::to_string(static_cast<int>(device_type_)));
+        }
+        add_kernel(get_output(0), get_bias(0), get_output(0),
+                   cuda_config_ ? cuda_config_->stream : nullptr);
     }
 
     return base::error::Success();
@@ -130,7 +141,6 @@ base::Status MatmulLayer::set_bias(int32_t idx, int32_t& dim, const void* bias_p
         tensor::Tensor bias(base::DataType::kDataTypeFp32, dim);
         bias.set_device_type(device_type);
         CHECK(bias.assign(buffer));
-        // LOG(INFO) << "bias:" << bias.index<float>(0);
         bias_.at(idx) = bias;
     } else {
         // is quant layer
@@ -143,9 +153,8 @@ base::Status MatmulLayer::set_bias(int32_t idx, int32_t& dim, const void* bias_p
         CHECK(bias_size % group_size_ == 0);
 
         int32_t scale_nums = bias_size / group_size_;
-        scales_ =
-            tensor::Tensor{base::DataType::kDataTypeFp32, scale_nums, false, nullptr,
-                           reinterpret_cast<float*>((int8_t*)bias_ptr + bias_size)};
+        scales_ = tensor::Tensor{base::DataType::kDataTypeFp32, scale_nums, false, nullptr,
+                                 reinterpret_cast<float*>((int8_t*)bias_ptr + bias_size)};
         scales_.set_device_type(device_type);
     }
 

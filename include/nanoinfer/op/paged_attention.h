@@ -29,8 +29,6 @@ class PagedAttention : public Layer {
 
     base::Status check() const override;
 
-    base::Status init() override;
-
     /**
      * @brief 执行 Paged Attention 前向传播
      *

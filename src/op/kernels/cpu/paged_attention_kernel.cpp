@@ -1,8 +1,8 @@
-#include "paged_attention_kernel.h"
 #include <cfloat>
 #include <cmath>
 #include <cstring>
 #include <vector>
+#include "../kernel_registry.h"
 
 namespace kernel {
 
@@ -11,8 +11,7 @@ void paged_attention_kernel_cpu(const tensor::Tensor& query, const tensor::Tenso
                                 const tensor::Tensor& block_table,
                                 const tensor::Tensor& context_lens, int32_t max_context_len,
                                 int32_t num_heads, int32_t num_kv_heads, int32_t head_size,
-                                int32_t block_size, float scale, void* stream) {
-    UNUSED(stream);
+                                int32_t block_size, float scale, [[maybe_unused]] void* stream) {
     UNUSED(max_context_len);
 
     int32_t batch_size = static_cast<int32_t>(query.get_dim(0));
@@ -98,5 +97,7 @@ void paged_attention_kernel_cpu(const tensor::Tensor& query, const tensor::Tenso
         }
     }
 }
+
+REGISTER_KERNEL(paged_attention, kDeviceCPU, paged_attention_kernel_cpu)
 
 }  // namespace kernel

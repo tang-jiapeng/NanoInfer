@@ -1,11 +1,11 @@
-#include "argmax_kernel.h"
 #include <algorithm>
 #include <cfloat>
+#include "../kernel_registry.h"
 
 namespace kernel {
 
-void argmax_kernel_cpu(const tensor::Tensor& input, const tensor::Tensor& output, void* stream) {
-    UNUSED(stream);
+void argmax_kernel_cpu(const tensor::Tensor& input, const tensor::Tensor& output,
+                       [[maybe_unused]] void* stream) {
     CHECK(input.device_type() == base::DeviceType::kDeviceCPU);
     CHECK(output.device_type() == base::DeviceType::kDeviceCPU);
 
@@ -23,5 +23,7 @@ void argmax_kernel_cpu(const tensor::Tensor& input, const tensor::Tensor& output
         out_ptr[i] = static_cast<int32_t>(std::distance(row, max_it));
     }
 }
+
+REGISTER_KERNEL(argmax, kDeviceCPU, argmax_kernel_cpu)
 
 }  // namespace kernel

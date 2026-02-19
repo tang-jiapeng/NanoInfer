@@ -1,5 +1,6 @@
 #include "nanoinfer/op/rmsnorm.h"
-#include "kernels/kernels_interface.h"
+#include "kernels/kernel_registry.h"
+#include "kernels/kernel_types.h"
 
 namespace op {
 RmsNormLayer::RmsNormLayer(base::DeviceType device_type, int32_t dim)
@@ -42,16 +43,18 @@ base::Status RmsNormLayer::forward() {
     if (!status) {
         return status;
     }
-    auto input = this->get_input(0);
-    auto weight = this->get_weight(0);
-    auto output = this->get_output(0);
     if (device_type_ == base::DeviceType::kDeviceCUDA) {
         CHECK(cuda_config_ != nullptr);
     }
 
-    kernel::get_rmsnorm_kernel(device_type_)(input, weight, output,
-                                             cuda_config_ ? cuda_config_->stream : nullptr);
-
+    auto rmsnorm_kernel =
+        kernel::KernelRegistry::instance().get<kernel::RMSNormKernelFn>("rmsnorm", device_type_);
+    if (!rmsnorm_kernel) {
+        return base::error::InternalError("RMSNorm kernel not found for device: " +
+                                          std::to_string(static_cast<int>(device_type_)));
+    }
+    rmsnorm_kernel(get_input(0), get_weight(0), get_output(0),
+                   cuda_config_ ? cuda_config_->stream : nullptr);
     return base::error::Success();
 }
 

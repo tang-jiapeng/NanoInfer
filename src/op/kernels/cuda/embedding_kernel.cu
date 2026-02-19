@@ -1,4 +1,4 @@
-#include "embedding_kernel.cuh"
+#include "../kernel_registry.h"
 
 namespace kernel {
 
@@ -39,14 +39,11 @@ void embedding_kernel_cu(const tensor::Tensor& input, const tensor::Tensor& weig
     constexpr int32_t thread_num = 128;
     int32_t block_num = input_num;
 
-    if (stream) {
-        cudaStream_t stream_ = static_cast<cudaStream_t>(stream);
-        embedding_kernel_cu_fp32<<<block_num, thread_num, 0, stream_>>>(
-            vocab_size, input_num, weight_dim, in_ptr, wei_ptr, out_ptr);
-    } else {
-        embedding_kernel_cu_fp32<<<block_num, thread_num>>>(vocab_size, input_num, weight_dim,
-                                                            in_ptr, wei_ptr, out_ptr);
-    }
+    cudaStream_t stream_ = static_cast<cudaStream_t>(stream);
+    embedding_kernel_cu_fp32<<<block_num, thread_num, 0, stream_>>>(
+        vocab_size, input_num, weight_dim, in_ptr, wei_ptr, out_ptr);
 }
+
+REGISTER_KERNEL(embedding, kDeviceCUDA, embedding_kernel_cu)
 
 }  // namespace kernel

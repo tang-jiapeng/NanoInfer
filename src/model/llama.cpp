@@ -1,5 +1,6 @@
 #include "nanoinfer/model/llama.h"
-#include "../op/kernels/cuda/rope_kernel.cuh"
+#include "../op/kernels/kernel_registry.h"
+#include "../op/kernels/kernel_types.h"
 #include "nanoinfer/op/add.h"
 #include "nanoinfer/op/matmul.h"
 #include "nanoinfer/op/paged_attention.h"
@@ -78,14 +79,21 @@ void LLamaModel::init_rope_cache() {
         tensor::Tensor(base::DataType::kDataTypeFp32, max_seq_len, head_size, true, allocator);
 
     if (device_type_ == base::DeviceType::kDeviceCUDA) {
-        // 使用 GPU Kernel 直接在显存生成
-        // 获取当前流
-        void* stream = cuda_config_ ? cuda_config_->stream : nullptr;
-        kernel::sin_cos_cache_calc_cu(head_size, max_seq_len, sin_cache_, cos_cache_, stream);
+        auto sin_cos_cal_kernel =
+            kernel::KernelRegistry::instance().get<kernel::SinCosCacheCalcKernelFn>(
+                "sin_cos_cache_calc", device_type_);
+        if (!sin_cos_cal_kernel) {
+            LOG(FATAL) << "SinCos Cache Calc kernel not found for device: "
+                       << static_cast<int>(device_type_);
+            return;
+        }
 
-        cudaStreamSynchronize(static_cast<cudaStream_t>(stream));
+        sin_cos_cal_kernel(head_size, max_seq_len, sin_cache_, cos_cache_,
+                           cuda_config_ ? cuda_config_->stream : nullptr);
+
+        cudaStreamSynchronize(static_cast<cudaStream_t>(cuda_config_->stream));
     } else {
-        // CPU 降级实现 (保持原来的逻辑，用于 CPU 推理)
+        // CPU 降级实现，用于 CPU 推理
         std::vector<float> h_sin(max_seq_len * head_size);
         std::vector<float> h_cos(max_seq_len * head_size);
         for (int pos = 0; pos < max_seq_len; ++pos) {
@@ -158,11 +166,6 @@ base::Status LLamaModel::init(base::DeviceType device_type) {
         memcpy(sin_host.data(), sin_cache_.ptr<float>(), 10 * sizeof(float));
         memcpy(cos_host.data(), cos_cache_.ptr<float>(), 10 * sizeof(float));
     }
-
-    LOG(INFO) << "RoPE Sin[0-4]: " << sin_host[0] << " " << sin_host[1] << " " << sin_host[2] << " "
-              << sin_host[3];
-    LOG(INFO) << "RoPE Cos[0-4]: " << cos_host[0] << " " << cos_host[1] << " " << cos_host[2] << " "
-              << cos_host[3];
 
     return base::error::Success();
 }

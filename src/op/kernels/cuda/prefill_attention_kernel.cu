@@ -1,12 +1,10 @@
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
-#include <glog/logging.h>
 
 #include <cfloat>
 #include <cmath>
 
-#include "nanoinfer/base/cuda_config.h"
-#include "prefill_attention_kernel.cuh"
+#include "../kernel_registry.h"
 
 namespace kernel {
 
@@ -147,7 +145,7 @@ __global__ void reshape_output_kernel(const float* input, float* output,
 // Kernel 4: Prefill KV Write (单序列, 批量 tokens)
 // ============================================================================
 // Grid: (chunk_len, num_kv_heads)
-__global__ void prefill_kv_write_kernel_cu(
+__global__ void prefill_kv_write_kernel(
     const float* __restrict__ k_src, const float* __restrict__ v_src,
     float* __restrict__ k_cache, float* __restrict__ v_cache,
     const int32_t* __restrict__ block_table,
@@ -224,18 +222,18 @@ __global__ void gather_kv_from_cache_kernel(
 //
 // 内存: Score 矩阵为 O(chunk_len × context_len), 不再是 O(seq_len²)
 
-void prefill_attention_kernel(
+void prefill_attention_kernel_cu(
     const tensor::Tensor& query, const tensor::Tensor& key,
     const tensor::Tensor& value, const tensor::Tensor& output,
     const tensor::Tensor& k_cache, const tensor::Tensor& v_cache,
     const tensor::Tensor& block_table, const tensor::Tensor& positions,
     int32_t num_heads, int32_t num_kv_heads, int32_t head_size,
-    int32_t block_size, int32_t context_len, const CudaConfig* config) {
+    int32_t block_size, int32_t context_len, void *config) {
   CHECK(config != nullptr);
-  CHECK(config->cublas_handle != nullptr);
+  CHECK(static_cast<const CudaConfig*>(config)->cublas_handle != nullptr);
 
-  cudaStream_t stream = config->stream;
-  cublasHandle_t handle = config->cublas_handle;
+  cudaStream_t stream = static_cast<const CudaConfig*>(config)->stream;
+  cublasHandle_t handle = static_cast<const CudaConfig*>(config)->cublas_handle;
   cublasSetStream(handle, stream);
 
   int32_t chunk_len = query.get_dim(0);  // 当前 chunk 的 token 数
@@ -252,7 +250,7 @@ void prefill_attention_kernel(
   {
     dim3 grid(chunk_len, num_kv_heads);
     int32_t threads = (head_size > 128) ? 256 : 128;
-    prefill_kv_write_kernel_cu<<<grid, threads, 0, stream>>>(
+    prefill_kv_write_kernel<<<grid, threads, 0, stream>>>(
         key.ptr<float>(), value.ptr<float>(),
         const_cast<float*>(k_cache.ptr<float>()),
         const_cast<float*>(v_cache.ptr<float>()), block_table.ptr<int32_t>(),
@@ -378,5 +376,7 @@ void prefill_attention_kernel(
   cudaFreeAsync(scores, stream);
   cudaFreeAsync(out_reshaped, stream);
 }
+
+REGISTER_KERNEL(prefill_attention, kDeviceCUDA, prefill_attention_kernel_cu);
 
 }  // namespace kernel

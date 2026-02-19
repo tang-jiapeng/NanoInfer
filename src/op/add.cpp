@@ -1,5 +1,6 @@
 #include "nanoinfer/op/add.h"
-#include "kernels/kernels_interface.h"
+#include "kernels/kernel_registry.h"
+#include "kernels/kernel_types.h"
 
 namespace op {
 VecAddLayer::VecAddLayer(base::DeviceType device_type)
@@ -49,14 +50,20 @@ base::Status VecAddLayer::forward() {
     if (!status) {
         return status;
     }
-    auto input1 = this->get_input(0);
-    auto input2 = this->get_input(1);
-    auto output = this->get_output(0);
     if (device_type_ == base::DeviceType::kDeviceCUDA) {
         CHECK(cuda_config_ != nullptr);
     }
-    kernel::get_add_kernel(device_type_)(input1, input2, output,
-                                         cuda_config_ ? cuda_config_->stream : nullptr);
+
+    auto add_kernel =
+        kernel::KernelRegistry::instance().get<kernel::AddKernelFn>("add", device_type_);
+    if (!add_kernel) {
+        return base::error::InternalError("Add kernel not found for device: " +
+                                          std::to_string(static_cast<int>(device_type_)));
+    }
+
+    add_kernel(get_input(0), get_input(1), get_output(0),
+               cuda_config_ ? cuda_config_->stream : nullptr);
+
     return base::error::Success();
 }
 }  // namespace op
