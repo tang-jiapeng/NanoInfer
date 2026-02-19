@@ -5,8 +5,6 @@
 #include "nanoinfer/base/base.h"
 #include "nanoinfer/op/layer.h"
 #include "nanoinfer/tensor/tensor.h"
-#include "nanoinfer/op/paged_attention.h"
-
 namespace model {
 
 /**
@@ -19,7 +17,7 @@ namespace model {
 struct LLamaLayers {
     std::shared_ptr<op::Layer> add_layer_;     ///< 残差连接加法层 (Add)
     std::shared_ptr<op::Layer> swiglu_layer_;  ///< FFN 激活层 (SwiGLU)
-    std::shared_ptr<op::PagedAttention> paged_attn_layer_;  ///< ROPE + Paged Attention 
+    std::shared_ptr<op::Layer> attn_layer_;  ///< Attention 层 (RoPE + Prefill/Decode Attention)
 
     // Attention 模块的线性投影层
     std::vector<std::shared_ptr<op::Layer>> wq_layers_;  ///< Query Projection

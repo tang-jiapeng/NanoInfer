@@ -25,7 +25,7 @@ enum class LayerType : uint8_t {
     kLayerSoftmax = 8,    ///< Softmax 激活
     kLayerAdd = 9,        ///< 逐元素加法
     kLayerSwiGLU = 10,    ///< SwiGLU 激活函数
-    kLayerPagedAttention = 11,  ///< 基于 vLLM 设计的 Paged Attention
+    kLayerAttention = 11,  ///< Attention 层 (Prefill + Decode)
 };
 
 /**
@@ -249,6 +249,30 @@ class Layer : public BaseLayer {
     void set_cuda_config(std::shared_ptr<kernel::CudaConfig> config);
 
     std::shared_ptr<kernel::CudaConfig> cuda_config() const;
+
+    // ---- Attention 相关配置接口 (默认空实现，由 AttentionLayer 等子类 override) ----
+
+    /**
+     * @brief 设置全局 KV Cache
+     */
+    virtual void set_kv_cache(const tensor::Tensor& /*key_cache*/,
+                              const tensor::Tensor& /*value_cache*/) {}
+
+    /**
+     * @brief 设置预计算的 RoPE 表
+     */
+    virtual void set_rope_cache(const tensor::Tensor& /*sin_cache*/,
+                                const tensor::Tensor& /*cos_cache*/) {}
+
+    /**
+     * @brief 设置是否为 Prefill 模式
+     */
+    virtual void set_prefill(bool /*is_prefill*/) {}
+
+    /**
+     * @brief 设置上下文长度 (Prefill 模式使用)
+     */
+    virtual void set_context_len(int32_t /*context_len*/) {}
 
    protected:
     std::vector<tensor::Tensor> inputs_;               ///< 输入 Tensor 列表

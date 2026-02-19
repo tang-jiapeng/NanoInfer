@@ -3,7 +3,7 @@
 #include "../op/kernels/kernel_types.h"
 #include "nanoinfer/op/add.h"
 #include "nanoinfer/op/matmul.h"
-#include "nanoinfer/op/paged_attention.h"
+#include "nanoinfer/op/attention.h"
 #include "nanoinfer/op/rmsnorm.h"
 #include "nanoinfer/op/rope.h"
 #include "nanoinfer/op/swiglu.h"
@@ -16,10 +16,10 @@ void LLamaLayers::to_cuda(std::shared_ptr<kernel::CudaConfig> config) {
         add_layer_->to_cuda();
     }
 
-    // PagedAttention 负责 RoPE 和 Attention
-    if (paged_attn_layer_) {
-        paged_attn_layer_->set_cuda_config(config);
-        paged_attn_layer_->to_cuda();
+    // Attention 层负责 RoPE + Prefill/Decode Attention
+    if (attn_layer_) {
+        attn_layer_->set_cuda_config(config);
+        attn_layer_->to_cuda();
     }
 
     if (swiglu_layer_) {
@@ -148,9 +148,9 @@ base::Status LLamaModel::init(base::DeviceType device_type) {
     // 初始化 RoPE Cache
     init_rope_cache();
 
-    // 将 RoPE Cache 注入到 PagedAttention
-    if (llama_layers_->paged_attn_layer_) {
-        llama_layers_->paged_attn_layer_->set_rope_cache(sin_cache_, cos_cache_);
+    // 将 RoPE Cache 注入到 Attention 层
+    if (llama_layers_->attn_layer_) {
+        llama_layers_->attn_layer_->set_rope_cache(sin_cache_, cos_cache_);
     }
 
     // Debug: Check RoPE Cache
@@ -278,7 +278,7 @@ base::Status LLamaModel::forward_batched(const ForwardBatch& input, tensor::Tens
         STATUS_CHECK(llama_layers_->wv_layers_[i]->forward(norm_out, v));
 
         // A3. Paged Attention (封装了 RoPE -> KV Write -> Attention)
-        auto& pa_layer = llama_layers_->paged_attn_layer_;
+        auto& pa_layer = llama_layers_->attn_layer_;
         // 设置 Prefill / Decode 模式
         pa_layer->set_prefill(input.is_prefill);
         if (input.is_prefill && !input.context_lens.empty()) {
@@ -354,8 +354,8 @@ void LLamaModel::create_nonparam_layers() {
     CHECK(llama_layers_ != nullptr);
     int32_t block_size = 16;
 
-    llama_layers_->paged_attn_layer_ =
-        std::make_shared<op::PagedAttention>(device_type_, 0, config_->kv_mul_, config_->kv_dim_,
+    llama_layers_->attn_layer_ =
+        std::make_shared<op::AttentionLayer>(device_type_, 0, config_->kv_mul_, config_->kv_dim_,
                                              config_->head_num_, config_->head_size_, block_size);
 
     // Add 层：处理残差连接
@@ -664,8 +664,8 @@ base::Status LLamaModel::create_layers() {
     STATUS_CHECK(check_layers(llama_layers_->w2_layers_, "W2"));
     STATUS_CHECK(check_layers(llama_layers_->w3_layers_, "W3"));
 
-    if (!llama_layers_->paged_attn_layer_) {
-        return error::InternalError("Create the paged attention layer for the llama model failed!");
+    if (!llama_layers_->attn_layer_) {
+        return error::InternalError("Create the attention layer for the llama model failed!");
     }
 
     if (!llama_layers_->add_layer_) {

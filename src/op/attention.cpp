@@ -1,65 +1,65 @@
-#include "nanoinfer/op/paged_attention.h"
+#include "nanoinfer/op/attention.h"
 #include "kernels/kernel_registry.h"
 #include "kernels/kernel_types.h"
 
 namespace op {
-PagedAttention::PagedAttention(base::DeviceType device_type, int32_t layer_index, int32_t kv_mul,
+AttentionLayer::AttentionLayer(base::DeviceType device_type, int32_t layer_index, int32_t kv_mul,
                                int32_t kv_dim, int32_t head_num, int32_t head_size,
                                int32_t block_size)
-    : Layer(device_type, LayerType::kLayerPagedAttention, "PagedAttention"),
+    : Layer(device_type, LayerType::kLayerAttention, "Attention"),
       layer_index_(layer_index),
       kv_mul_(kv_mul),
       kv_dim_(kv_dim),
       head_num_(head_num),
       head_size_(head_size),
       block_size_(block_size) {
-    // Paged Attention 需要 6 个动态输入
+    // Attention 需要 6 个动态输入
     reset_input_size(6);
     reset_output_size(1);
 }
 
-base::Status PagedAttention::check() const {
+base::Status AttentionLayer::check() const {
     // 检查输入是否齐全
     for (int i = 0; i < 6; ++i) {
         if (get_input(i).is_empty()) {
             return base::Status(base::StatusCode::kInternalError,
-                                "Input " + std::to_string(i) + " is empty in PagedAttention");
+                                "Input " + std::to_string(i) + " is empty in AttentionLayer");
         }
     }
     // 检查全局资源是否设置
     if (key_cache_.is_empty() || value_cache_.is_empty()) {
         return base::Status(base::StatusCode::kInvalidArgument,
-                            "KV Cache not set in PagedAttention");
+                            "KV Cache not set in AttentionLayer");
     }
     if (sin_cache_.is_empty() || cos_cache_.is_empty()) {
         return base::Status(base::StatusCode::kInvalidArgument,
-                            "RoPE Cache not set in PagedAttention");
+                            "RoPE Cache not set in AttentionLayer");
     }
     return base::error::Success();
 }
 
-void PagedAttention::set_kv_cache(const tensor::Tensor& key_cache,
+void AttentionLayer::set_kv_cache(const tensor::Tensor& key_cache,
                                   const tensor::Tensor& value_cache) {
     // 仅仅持有引用/浅拷贝，不分配新内存
     key_cache_ = key_cache;
     value_cache_ = value_cache;
 }
 
-void PagedAttention::set_rope_cache(const tensor::Tensor& sin_cache,
+void AttentionLayer::set_rope_cache(const tensor::Tensor& sin_cache,
                                     const tensor::Tensor& cos_cache) {
     sin_cache_ = sin_cache;
     cos_cache_ = cos_cache;
 }
 
-void PagedAttention::set_prefill(bool is_prefill) {
+void AttentionLayer::set_prefill(bool is_prefill) {
     is_prefill_ = is_prefill;
 }
 
-void PagedAttention::set_context_len(int32_t context_len) {
+void AttentionLayer::set_context_len(int32_t context_len) {
     context_len_ = context_len;
 }
 
-base::Status PagedAttention::forward() {
+base::Status AttentionLayer::forward() {
     auto status = check();
     if (!status) return status;
 
