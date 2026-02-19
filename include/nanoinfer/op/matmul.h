@@ -45,6 +45,8 @@ class MatmulLayer : public LayerParam {
      */
     base::Status forward() override;
 
+    using LayerParam::forward;  ///< 引入基类多参重载，避免 C++ 名字遮蔽
+
     /**
      * @brief 设置偏置项数据
      *

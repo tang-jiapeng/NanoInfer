@@ -45,6 +45,8 @@ class SwiGLULayer : public op::Layer {
      */
     base::Status forward() override;
 
+    using Layer::forward;  ///< 引入基类多参重载，避免 C++ 名字遮蔽
+
    private:
     int32_t hidden_dim_ = 0;  ///< 隐藏层特征维度
 };

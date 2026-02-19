@@ -6,7 +6,6 @@
 
 namespace op {
 
-
 /**
  * @brief 词嵌入层 (Embedding Layer)
  *
@@ -47,6 +46,8 @@ class EmbeddingLayer : public LayerParam {
      * 输出形状: [batch_size, seq_len, dim]
      */
     base::Status forward() override;
+
+    using LayerParam::forward;  ///< 引入基类多参重载，避免 C++ 名字遮蔽
 
    private:
     int32_t dim_ = 0;         ///< Embedding 维度

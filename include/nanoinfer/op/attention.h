@@ -41,6 +41,8 @@ class AttentionLayer : public Layer {
      */
     base::Status forward() override;
 
+    using Layer::forward;  ///< 引入基类多参重载，避免 C++ 名字遮蔽
+
     /**
      * @brief 设置全局 KV Cache (由 CacheManager 分配)
      * @param key_cache [num_blocks, block_size, num_kv_heads, head_dim]

@@ -46,6 +46,8 @@ class RoPELayer : public Layer {
      */
     base::Status forward() override;
 
+    using Layer::forward;  ///< 引入基类多参重载，避免 C++ 名字遮蔽
+
    private:
     int32_t dim_ = 0;        ///< Query 总维度
     int32_t kv_dim_ = 0;     ///< Key 总维度
