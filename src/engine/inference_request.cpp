@@ -50,15 +50,20 @@ void InferenceRequest::resume() {
 
 /**
  * @brief 添加生成的 Token 并检查停止条件
- * @return true = 继续生成，false = 已完成（遇 EOS 或达到最大长度）
+ *
+ * 支持两个停止 token（LLaMA3 有 <|end_of_text|>=128001 和 <|eot_id|>=128009）。
+ * eos_token_id2 默认为 -1（即不启用第二停止符）。
+ *
+ * @return true = 继续生成，false = 已完成（遇到任一 EOS 或达到最大长度）
  */
-bool InferenceRequest::add_token(int32_t token, int32_t eos_token_id) {
+bool InferenceRequest::add_token(int32_t token, int32_t eos_token_id, int32_t eos_token_id2) {
     generated_tokens_.push_back(token);
 
     // 检查停止条件:
-    // 生成了结束符 (EOS)
+    // 生成了结束符 (EOS / EOT)
     // 达到了最大生成长度限制
-    if (token == eos_token_id || generated_len() >= max_new_tokens_) {
+    bool is_eos = (token == eos_token_id) || (eos_token_id2 != -1 && token == eos_token_id2);
+    if (is_eos || generated_len() >= max_new_tokens_) {
         finish();
         return false;
     }

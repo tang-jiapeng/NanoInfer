@@ -199,6 +199,8 @@ base::Status Model::create_encode_layer() {
     if (config_->eos_token_id_ == -1) {
         config_->eos_token_id_ = encode_layer_->eos_id();
     }
+    // 设置第二停止符（BPE：<|eot_id|>， SPE 返回 -1）
+    config_->eot_token_id_ = encode_layer_->stop_token2();
 
     return error::Success();
 }

@@ -226,8 +226,11 @@ int main(int argc, char** argv) {
         cudaMemcpy(&next_token_id, next_token_tensor.ptr<void>(), sizeof(int32_t),
                    cudaMemcpyDeviceToHost);
 
-        // EOS 检测
-        if (next_token_id == model->config().eos_token_id_) break;
+        // EOS 检测（LLaMA3 有双停止符：eos_token_id_ 和 eot_token_id_）
+        auto& cfg = model->config();
+        if (next_token_id == cfg.eos_token_id_ ||
+            (cfg.eot_token_id_ != -1 && next_token_id == cfg.eot_token_id_))
+            break;
 
         total_output_ids.push_back(next_token_id);
         current_pos++;

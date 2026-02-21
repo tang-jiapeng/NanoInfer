@@ -42,6 +42,7 @@ struct TransformerConfig {
 
     int32_t bos_token_id_ = -1;
     int32_t eos_token_id_ = -1;
+    int32_t eot_token_id_ = -1;  ///< 第二停止符（LLaMA3 <|eot_id|>=128009，其他模型为 -1）
 
     float rope_theta_ = 10000.0f;  ///< RoPE 基础频率 (LLama2=10000, LLama3=500000)
     float norm_eps_ = 1e-5f;       ///< RMSNorm epsilon

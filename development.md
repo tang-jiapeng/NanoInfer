@@ -498,7 +498,335 @@ cblas_sgemm(..., chunk_len, context_len, head_size, ...);
 
 ---
 
-## 七、优先级与时间线建议
+## 八、多卡并行推理 (Multi-GPU Tensor Parallelism)
+
+### 8.1 背景与目标
+
+**问题**：大参数量模型（如 LLaMA-3 70B 全精度约 280 GB、FP16 约 140 GB）无法装入单张 GPU（A100 80GB）。  
+**目标**：通过 **张量并行 (Tensor Parallelism, TP)** 将模型权重水平切分到多卡上，每张 GPU 只保存 1/N 的权重，实现超出单卡显存上限的模型推理。
+
+本方案聚焦 **TP** 策略（行/列并行线性层），适合 NanoInfer 现有的单机多卡（NVLink 或 PCIe）场景，无需修改调度器与 KV Cache 管理逻辑。
+
+---
+
+### 8.2 并行策略选型
+
+| 策略 | 适用场景 | 通信量 | 实现复杂度 |
+|---|---|---|---|
+| **Tensor Parallelism (TP)** | 单机多卡，权重切分 | O(B×S×D/step) AllReduce | 中 |
+| Pipeline Parallelism (PP) | 超多层模型，逐层切分 | 点对点激活传输 | 高（需 micro-batch 流水线） |
+| Sequence Parallelism | 超长序列 (>32K) | 同 TP | 高（KV Cache 须分段） |
+
+**结论**：首期只实现 TP，PP 作为长期规划预留接口。
+
+---
+
+### 8.3 Tensor Parallelism 数学原理
+
+#### 8.3.1 列并行 Linear（Column-Parallel）
+
+将权重矩阵 $W \in \mathbb{R}^{K \times N}$ 沿 **输出维度** 按 GPU 数切分：
+
+$$W = [W_0 \mid W_1 \mid \cdots \mid W_{P-1}], \quad W_i \in \mathbb{R}^{K \times (N/P)}$$
+
+每卡本地计算 $Y_i = X W_i$，输出 $Y_i \in \mathbb{R}^{B \times (N/P)}$，**无需通信**（结果在输出维度上拼接）。
+
+适用于：Q/K/V 投影、FFN `gate_proj`、FFN `up_proj`。
+
+#### 8.3.2 行并行 Linear（Row-Parallel）
+
+将权重矩阵 $W \in \mathbb{R}^{K \times N}$ 沿 **输入维度** 切分（即每卡持有不同的输入分片）：
+
+$$W = \begin{bmatrix} W_0 \\ W_1 \\ \vdots \\ W_{P-1} \end{bmatrix}, \quad W_i \in \mathbb{R}^{(K/P) \times N}$$
+
+每卡计算 $Y_i = X_i W_i$（$X_i$ 是上一层列并行的本卡输出），最终需要 **AllReduce** 聚合：$Y = \sum_i Y_i$。
+
+适用于：Attention Output 投影、FFN `down_proj`。
+
+#### 8.3.3 每个 Transformer 层的通信模式
+
+```
+Input X (replicated on all GPUs)
+  │
+  ├─ [Column-Parallel] QKV Proj  → Y_qkv_i (local shard)
+  │       no comm needed
+  │
+  ├─ Attention (each GPU handles num_heads/P heads)
+  │
+  ├─ [Row-Parallel]   O Proj     → Y_o_i (partial sum)
+  │       ──AllReduce──→  Y_o (replicated)
+  │
+  ├─ RMSNorm (local, replicated)
+  │
+  ├─ [Column-Parallel] gate/up   → Y_gate_i, Y_up_i (local)
+  │       SwiGLU (local)
+  │
+  └─ [Row-Parallel]   down_proj  → Y_ffn_i (partial sum)
+          ──AllReduce──→  Y_ffn (replicated)
+```
+
+每层只需 **2 次 AllReduce**（O_proj 后 + down_proj 后），通信量为 $2 \times B \times S \times D \times \text{sizeof(float)}$，与层数无关。
+
+---
+
+### 8.4 代码改动方案
+
+#### 8.4.1 新增基础设施：NCCL 通信器封装
+
+新建 `include/nanoinfer/base/comm.h` 和 `src/base/comm.cpp`：
+
+```cpp
+namespace base {
+
+/// 封装单个进程（GPU）的通信上下文
+struct CommContext {
+    int rank;          ///< 当前 GPU rank
+    int world_size;    ///< 总 GPU 数
+    ncclComm_t comm;   ///< NCCL communicator
+    cudaStream_t stream; ///< 专用通信 stream，与计算 stream 分离
+};
+
+/// 全局单例（进程内唯一）
+class CommManager {
+public:
+    static CommManager& instance();
+    /// 初始化：从环境变量 RANK / WORLD_SIZE / MASTER_ADDR 读取配置
+    base::Status init(int rank, int world_size, const std::string& master_addr, int master_port);
+    void all_reduce_sum(void* buf, size_t count, ncclDataType_t dtype);
+    void broadcast(void* buf, size_t count, ncclDataType_t dtype, int root);
+    const CommContext& ctx() const { return ctx_; }
+private:
+    CommContext ctx_;
+};
+
+} // namespace base
+```
+
+**依赖**：CMakeLists.txt 通过 `find_package(NCCL REQUIRED)` 链接 `libnccl.so`。
+
+---
+
+#### 8.4.2 新增算子：并行 Linear 层
+
+新建 `include/nanoinfer/op/parallel_linear.h`：
+
+```cpp
+namespace op {
+
+/// 列并行 Linear：每卡持有 W[:, local_start:local_end]
+/// 输出为本卡的局部分片，无 AllReduce
+class ColumnParallelLinear : public Layer {
+public:
+    explicit ColumnParallelLinear(base::DeviceType device,
+                                   int32_t in_features, int32_t out_features,
+                                   bool has_bias = false);
+    base::Status forward(const tensor::Tensor& input, tensor::Tensor& output) override;
+    // 权重形状: [in_features, out_features/world_size]（本卡分片）
+};
+
+/// 行并行 Linear：每卡持有 W[local_start:local_end, :]
+/// 前向结束后执行 AllReduce，输出在所有卡上 replicate
+class RowParallelLinear : public Layer {
+public:
+    explicit RowParallelLinear(base::DeviceType device,
+                                int32_t in_features, int32_t out_features,
+                                bool has_bias = false);
+    base::Status forward(const tensor::Tensor& input, tensor::Tensor& output) override;
+    // 内部在 output 上调用 CommManager::all_reduce_sum
+};
+
+} // namespace op
+```
+
+---
+
+#### 8.4.3 模型层改动：LLamaModel
+
+**现有 MatMul 层替换规则**：
+
+| 原有层 | 替换为 | 说明 |
+|---|---|---|
+| QKV MatMul | `ColumnParallelLinear` | 每卡算 `num_heads/P` 个头 |
+| O Proj MatMul | `RowParallelLinear` | 输出 AllReduce |
+| gate_proj / up_proj | `ColumnParallelLinear` | FFN 输入端 |
+| down_proj | `RowParallelLinear` | FFN 输出端 + AllReduce |
+| Embedding | 按 vocab 行切分（`VocabParallelEmbedding`）| AllGather |
+| LM Head | 按 vocab 列切分 | AllReduce logits |
+
+**关键**：RMSNorm、RoPE、SwiGLU 不需要改动（均为 element-wise 操作，在复制数据上本地执行）。
+
+---
+
+#### 8.4.4 KV Cache：每卡只存本卡 head 的 Cache
+
+由于 QKV 已列并行切分，每卡只负责 `num_kv_heads / world_size` 个 KV head：
+
+- `KVCacheManager::allocate_kv_cache()` 中 `num_kv_heads` 改为 `config.kv_head_num_ / world_size`
+- 每卡 KV Cache 显存占用线性降低（`1/P`）
+- PagedAttention kernel 无需修改（只操作本卡的 KV head 分片）
+
+---
+
+#### 8.4.5 权重切分：导出脚本修改
+
+`tools/export_llama2.py` 增加 `--tp_size N` 参数，导出 N 份分片权重：
+
+```
+models/llama3_70b_tp2/
+  rank0/llama3_fp32.bin   # W[:, :N/2]  的所有层
+  rank1/llama3_fp32.bin   # W[:, N/2:]  的所有层
+  tokenizer.bin
+```
+
+权重切分逻辑：
+- **列并行层**：沿 axis=0（输出维度）切分
+- **行并行层**：沿 axis=1（输入维度）切分
+- **Embedding**：沿 vocab 维度切分
+- **RMSNorm weights**：完整复制到每张卡（体积极小，无需切分）
+
+---
+
+#### 8.4.6 进程启动方式
+
+使用 `torchrun` 或自定义 launcher 分别在每张 GPU 上启动一个进程：
+
+```bash
+# 2 卡并行推理
+torchrun --nproc_per_node=2 --standalone \
+    demo/llama3_tp2  --model llama3 --tp_size 2
+
+# 或用 mpirun
+mpirun -np 2 ./build/demo/llama3 --model llama3 --tp_size 2
+```
+
+**进程间同步**：
+- 每个进程读取自己的分片权重（`rank0/llama3_fp32.bin`）
+- Tokenize、Encode、Decode 仅在 `rank == 0` 的进程执行
+- Forward pass 在所有进程上同步进行
+
+---
+
+### 8.5 详细实现步骤
+
+#### Phase 1：基础通信层（约 2 天）
+
+1. `CMakeLists.txt` 集成 NCCL：
+   ```cmake
+   find_package(NCCL REQUIRED)
+   target_link_libraries(nanoinfer PRIVATE NCCL::NCCL)
+   ```
+2. 实现 `CommManager`：初始化 NCCL communicator、`all_reduce_sum`、`broadcast`
+3. 新增 `base::init_distributed(rank, world_size)` 全局初始化接口
+4. 单元测试：2 卡 AllReduce 正确性验证（`test/test_base/test_comm.cpp`）
+
+#### Phase 2：并行 Linear 算子（约 2 天）
+
+1. 实现 `ColumnParallelLinear`：本地 MatMul，无通信
+2. 实现 `RowParallelLinear`：本地 MatMul + AllReduce
+3. 实现 `VocabParallelEmbedding`：行切分 Embedding + AllReduce
+4. 单元测试：2 卡并行 vs 单卡全量结果对比（数值误差 < 1e-5）
+
+#### Phase 3：权重导出工具（约 1.5 天）
+
+1. `tools/export_llama2.py` 增加 `--tp_size` 参数
+2. 实现权重切分逻辑（列/行方向）
+3. 每张卡导出独立的 `.bin` 文件
+4. 验证：单卡 vs 合并后结果完全一致
+
+#### Phase 4：模型层集成（约 2 天）
+
+1. `LLamaModel::init_layers()` 中根据 `tp_size > 1` 决定使用并行还是普通 Linear
+2. 新增 `TransformerConfig::tp_rank_` 和 `tp_size_` 字段
+3. KV Cache 分配改为 `kv_head_num / tp_size`
+4. Logits AllReduce（LM Head 输出后）
+
+#### Phase 5：推理入口改造（约 1 天）
+
+1. `demo/llama2.cpp` 增加 `--tp_size N` 参数
+2. `main()` 开头调用 `base::init_distributed(rank, world_size)`
+3. rank != 0 的进程不打印输出、不执行 tokenize
+4. 端到端测试：2 卡推理结果与单卡完全一致
+
+#### Phase 6：性能调优（约 2 天）
+
+1. 通信 stream 与计算 stream 分离，overlap AllReduce 与下一层计算
+2. NVLink 拓扑感知调度（优先使用 NVLink P2P 路径）
+3. 压测：2/4/8 卡吞吐对比，计算 AllReduce 通信开销占比
+
+---
+
+### 8.6 关键文件变更清单
+
+```
+新增：
+  include/nanoinfer/base/comm.h          ← CommManager / CommContext
+  src/base/comm.cpp
+  include/nanoinfer/op/parallel_linear.h ← ColumnParallelLinear / RowParallelLinear
+  src/op/parallel_linear.cpp
+  test/test_base/test_comm.cpp
+  test/test_op/test_parallel_linear.cpp
+
+修改：
+  CMakeLists.txt                         ← 链接 NCCL
+  include/nanoinfer/model/config.h       ← 增加 tp_rank_, tp_size_
+  include/nanoinfer/model/llama.h        ← init_layers 支持并行层
+  src/model/llama.cpp                    ← 层初始化切换逻辑
+  src/engine/kv_cache_manager.cpp        ← kv_head_num /= tp_size
+  tools/export_llama2.py                 ← --tp_size 权重切分
+  demo/llama2.cpp                        ← --tp_size 参数 + init_distributed
+  demo/batched_infer_multi_prompts.cpp   ← 同上
+```
+
+---
+
+### 8.7 正确性验证
+
+```bash
+# Step 1：导出 2 卡分片权重
+python tools/export_llama2.py --model_dir ./hf/llama3 --tp_size 2 --outdir ./models/llama3_tp2
+
+# Step 2：单卡推理（基准）
+./build/demo/llama3 --model llama3 --tp_size 1 > output_tp1.txt
+
+# Step 3：2 卡推理
+mpirun -np 2 ./build/demo/llama3 --model llama3 --tp_size 2 > output_tp2.txt
+
+# Step 4：对比（greedy 推理下结果应完全一致）
+diff output_tp1.txt output_tp2.txt
+```
+
+同时用 `eval/hf_verify.py` 作为精度基准进行端到端对比。
+
+---
+
+### 8.8 长期规划：Pipeline Parallelism（预留）
+
+当卡数进一步增加（P > 8）或模型极深时，TP 的 AllReduce 通信开销会成瓶颈，此时考虑引入 PP：
+
+- 将 N 个 Transformer 层分成 P 组，每组放一张卡
+- 相邻卡之间传输激活（P2P `cudaMemcpyPeerAsync`）
+- 需要 micro-batch 流水线调度消除气泡（GPipe / PipeDream 方案）
+- `InferenceRequest` 需支持跨卡的激活暂存与恢复
+
+PP 实现复杂度显著高于 TP，建议 TP 稳定后再行规划。
+
+---
+
+### 8.9 预计工作量汇总
+
+| Phase | 内容 | 工作量 |
+|---|---|---|
+| Phase 1 | NCCL 通信基础层 | 2 天 |
+| Phase 2 | 并行 Linear 算子 | 2 天 |
+| Phase 3 | 权重切分导出工具 | 1.5 天 |
+| Phase 4 | 模型层集成 | 2 天 |
+| Phase 5 | 推理入口改造 | 1 天 |
+| Phase 6 | 性能调优 & 压测 | 2 天 |
+| **合计** | | **~10.5 天** |
+
+---
+
+## 九、优先级与时间线建议
 
 | 优先级 | 任务 | 预计工作量 | 依赖 |
 |--------|------|-----------|------|
@@ -521,3 +849,7 @@ cblas_sgemm(..., chunk_len, context_len, head_size, ...);
 | P3 (低) | CUDA Graph | 3-5 天 | 无 |
 | P3 (低) | Speculative Decoding | 5-7 天 | 多模型加载 |
 | P3 (低) | Priority + Preemption (KV Swap) | 3-5 天 | Priority 调度 |
+| P3 (低) | **多卡 TP：NCCL 通信层** | 2 天 | 无 |
+| P3 (低) | **多卡 TP：并行 Linear 算子** | 2 天 | NCCL 通信层 |
+| P3 (低) | **多卡 TP：权重切分导出 + 模型集成** | 3.5 天 | 并行算子 |
+| P3 (低) | **多卡 TP：推理入口 + 端到端验证** | 3 天 | 模型集成 |

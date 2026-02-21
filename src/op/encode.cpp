@@ -138,14 +138,14 @@ BpeEncodeLayer::BpeEncodeLayer(std::string token_model_path, bool has_bos, bool 
 /**
  * @brief 编码：字符串 → Token ID 序列
  *
- * 前向算法：将空格（原始 0x20）替换为 BPE 词表中对应的 Ġ，
- * 再通过 tiktoken 进行 BPE 分词。
+ * 直接将原始 UTF-8 文本传给 tiktoken 进行 BPE 分词。
+ * encoder_ 的键已经是原始字节（由 unicode_utf8_to_byte 还原），
+ * 因此不需要对空格做任何预处理。
  * 可选在序列首尾添加 BOS/EOS token。
  */
 std::vector<int32_t> BpeEncodeLayer::encode(const std::string& sentence) const {
     CHECK(tiktoken_ != nullptr);
-    const std::string s = absl::StrReplaceAll(sentence, {{" ", "\xc4\xa0"}});
-    const std::vector<int> ids = tiktoken_->encode(s);
+    const std::vector<int> ids = tiktoken_->encode(sentence);
 
     std::vector<int32_t> input_ids;
     input_ids.reserve(ids.size() + 2);
@@ -169,13 +169,13 @@ std::string BpeEncodeLayer::decode(int32_t token_id) const {
 /**
  * @brief 解码：Token ID 序列 → 完整字符串
  *
- * 将 tiktoken 输出中的 Ġ 还原为实际空格。
+ * tiktoken._decode_native() 直接返回原始字节（decoder_ 键已是原始字节），
+ * 即空格以 0x20 呈现，无需任何后处理。
  */
 std::string BpeEncodeLayer::decode(const std::vector<int32_t>& token_ids) const {
     CHECK(tiktoken_ != nullptr);
     std::vector<int> ids(token_ids.begin(), token_ids.end());
-    const std::string raw = tiktoken_->decode(ids);
-    return absl::StrReplaceAll(raw, {{"\xc4\xa0", " "}});
+    return tiktoken_->decode(ids);
 }
 
 /** @brief 判断 token 是否为停止符（<|end_of_text|> 或 <|eot_id|>） */

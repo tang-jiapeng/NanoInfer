@@ -107,7 +107,7 @@ class InferenceRequest {
      * @param eos_token_id EOS Token ID
      * @return false 表示触发停止条件（EOS 或达到 max_new_tokens）
      */
-    bool add_token(int32_t token, int32_t eos_token_id);
+    bool add_token(int32_t token, int32_t eos_token_id, int32_t eos_token_id2 = -1);
 
     /// @brief 累加已计算 Token 计数（Chunked Prefill 每完成一 Chunk 调用）
     void add_computed_tokens(int32_t count);

@@ -319,7 +319,8 @@ base::Status Engine::execute_prefill_single(const InferenceRequestPtr& req,
 
         // 采样后检查 EOS / max_tokens，决定是否继续生成
         int32_t eos_id = model_->config().eos_token_id_;
-        bool continue_gen = req->add_token(next_token, eos_id);
+        int32_t eot_id = model_->config().eot_token_id_;
+        bool continue_gen = req->add_token(next_token, eos_id, eot_id);
         if (!continue_gen) {
             finished_ids.push_back(req->request_id());
             kv_cache_manager_->free_sequence(request_id);
@@ -412,10 +413,11 @@ base::Status Engine::execute_decode_batch(const std::vector<InferenceRequestPtr>
 
     // 更新每个请求的状态: 记录 computed_tokens, 检查 EOS / max_tokens
     int32_t eos_id = model_->config().eos_token_id_;
+    int32_t eot_id = model_->config().eot_token_id_;
     for (int i = 0; i < batch_size; ++i) {
         auto& req = reqs[i];
         req->add_computed_tokens(1);  // decode forward 已将本 token 的 K/V 写入 cache
-        bool continue_gen = req->add_token(next_tokens[i], eos_id);
+        bool continue_gen = req->add_token(next_tokens[i], eos_id, eot_id);
         if (!continue_gen) {
             finished_ids.push_back(req->request_id());
             kv_cache_manager_->free_sequence(static_cast<int32_t>(req->request_id()));

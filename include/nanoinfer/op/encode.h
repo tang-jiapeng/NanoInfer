@@ -53,6 +53,11 @@ class EncodeLayerBase : public Layer {
 
     virtual int32_t eos_id() const = 0;
 
+    /// @brief 第二停止符（BPE 模型用，如 <|eot_id|>），默认 -1 表示不存在
+    virtual int32_t stop_token2() const {
+        return -1;
+    }
+
    protected:
     bool has_bos_ = true;
     bool has_eos_ = false;
