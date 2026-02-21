@@ -122,18 +122,26 @@ using RoPEKernelFn = void (*)(int32_t dim, int32_t kv_dim, int32_t head_size,
 
 /**
  * @brief RoPE Sin/Cos 缓存预计算 Kernel 协议
- * @details 在模型初始化阶段，生成 RoPE 需要的 Sin 和 Cos 查找表
+ * @details 在模型初始化阶段，生成 RoPE 需要的 Sin 和 Cos 查找表。
+ *          支持标准 RoPE 和 LLaMA3-type RoPE scaling。
  * @param head_size 单个 Attention 头的大小
  * @param max_seq_len 模型支持的最大上下文/序列长度
  * @param sin_cache 输出的 Sin 缓存张量 [max_seq_len, head_size]
  * @param cos_cache 输出的 Cos 缓存张量 [max_seq_len, head_size]
  * @param rope_theta RoPE theta 参数
+ * @param has_rope_scaling 是否启用 RoPE scaling
+ * @param scaling_factor 频率缩放因子（低频维度 freq /= factor）
+ * @param low_freq_factor 低频因子（用于计算 low_freq_wavelen）
+ * @param high_freq_factor 高频因子（用于计算 high_freq_wavelen）
+ * @param original_max_pos 原始最大位置（用于计算 wavelen 阈值）
  * @param stream_or_config CUDA 流指针 (cudaStream_t)
  */
 using SinCosCacheCalcKernelFn = void (*)(int32_t head_size, int32_t max_seq_len,
                                          const tensor::Tensor& sin_cache,
-                                         const tensor::Tensor& cos_cache, const float rope_theta,
-                                         void* stream_or_config);
+                                         const tensor::Tensor& cos_cache, float rope_theta,
+                                         bool has_rope_scaling, float scaling_factor,
+                                         float low_freq_factor, float high_freq_factor,
+                                         int32_t original_max_pos, void* stream_or_config);
 
 /**
  * @brief Paged KV Cache 写入 Kernel 协议

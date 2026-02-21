@@ -83,28 +83,50 @@ __global__ void rope_kernel_cu_fp32(int32_t total_tokens, int32_t dim, int32_t k
     }
 }
 
-// [New] 预计算 Sin/Cos Kernel
-// Grid: (total_elements + 255) / 256
-// Block: 256
+/**
+ * @brief 预计算 Sin/Cos Cache Kernel（支持 LLaMA3 RoPE Scaling）
+ *
+ * 每个线程计算 sin_cache / cos_cache 中的一个元素。
+ * LLaMA3 RoPE Scaling 算法：
+ *   - wavelen < high_freq_wavelen → 保持原频率（高频维度）
+ *   - wavelen > low_freq_wavelen  → freq /= factor（低频维度）
+ *   - 中间区域                     → 平滑插值
+ */
 __global__ void sin_cos_calc_kernel(int head_size, int max_seq_len, float* sin_cache,
-                                    float* cos_cache, const float rope_theta) {
-    // 展平索引：idx = pos * head_size + head_dim
+                                    float* cos_cache, float rope_theta, bool has_rope_scaling,
+                                    float scaling_factor, float low_freq_factor,
+                                    float high_freq_factor, int original_max_pos) {
     int idx = threadIdx.x + blockDim.x * blockIdx.x;
     int total_elements = head_size * max_seq_len;
 
     if (idx >= total_elements) return;
 
-    // 反算出 pos 和 head_dim
     int pos = idx / head_size;
     int head_dim = idx % head_size;
 
-    // Llama RoPE 频率公式: theta = rope_theta ^ (-2(i/2)/d)
-    // 关键: 使用 (head_dim / 2 * 2) 确保偶数对共享频率
+    // 基础频率: theta^(-2i/d)，偶数对共享频率
     float freq_exponent = static_cast<float>(head_dim / 2 * 2) / static_cast<float>(head_size);
     float freq = 1.0f / powf(rope_theta, freq_exponent);
 
-    float val = static_cast<float>(pos) * freq;
+    // LLaMA3-type RoPE Scaling
+    if (has_rope_scaling) {
+        float wavelen = 2.0f * 3.141592653589793f / freq;
+        float low_freq_wavelen = static_cast<float>(original_max_pos) / low_freq_factor;
+        float high_freq_wavelen = static_cast<float>(original_max_pos) / high_freq_factor;
 
+        if (wavelen >= low_freq_wavelen) {
+            // 低频维度：直接除以 factor
+            freq /= scaling_factor;
+        } else if (wavelen > high_freq_wavelen) {
+            // 中间区域：平滑插值
+            float smooth = (static_cast<float>(original_max_pos) / wavelen - low_freq_factor) /
+                           (high_freq_factor - low_freq_factor);
+            freq = (1.0f - smooth) * freq / scaling_factor + smooth * freq;
+        }
+        // wavelen < high_freq_wavelen: 高频维度保持不变
+    }
+
+    float val = static_cast<float>(pos) * freq;
     sin_cache[idx] = sinf(val);
     cos_cache[idx] = cosf(val);
 }
@@ -114,16 +136,24 @@ __global__ void sin_cos_calc_kernel(int head_size, int max_seq_len, float* sin_c
  *
  * 配置 Grid = ceil(total / 256), Block = 256，启动 sin_cos_calc_kernel。
  * 生成 [max_seq_len, head_size] 的查找表，供 RoPE Kernel 使用。
+ * 支持标准 RoPE 和 LLaMA3-type RoPE Scaling。
  *
- * @param head_size    每个 Head 的维度
- * @param max_seq_len  支持的最大序列长度
- * @param sin_cache    输出 Sin 缓存 Tensor [max_seq_len × head_size]，CUDA 设备
- * @param cos_cache    输出 Cos 缓存 Tensor [max_seq_len × head_size]，CUDA 设备
- * @param rope_theta   RoPE theta 参数
- * @param stream       CUDA Stream
+ * @param head_size         每个 Head 的维度
+ * @param max_seq_len       支持的最大序列长度
+ * @param sin_cache         输出 Sin 缓存 Tensor [max_seq_len × head_size]
+ * @param cos_cache         输出 Cos 缓存 Tensor [max_seq_len × head_size]
+ * @param rope_theta        RoPE theta 参数
+ * @param has_rope_scaling  是否启用 RoPE scaling
+ * @param scaling_factor    频率缩放因子
+ * @param low_freq_factor   低频因子
+ * @param high_freq_factor  高频因子
+ * @param original_max_pos  原始最大位置
+ * @param stream            CUDA Stream
  */
-void sin_cos_cache_calc_cu(int head_size, int max_seq_len, const tensor::Tensor& sin_cache,
-                           const tensor::Tensor& cos_cache, const float rope_theta, void* stream) {
+void sin_cos_cache_calc_cu(int32_t head_size, int32_t max_seq_len, const tensor::Tensor& sin_cache,
+                           const tensor::Tensor& cos_cache, float rope_theta, bool has_rope_scaling,
+                           float scaling_factor, float low_freq_factor, float high_freq_factor,
+                           int32_t original_max_pos, void* stream) {
     CHECK(!sin_cache.is_empty());
     CHECK(!cos_cache.is_empty());
 
@@ -135,7 +165,8 @@ void sin_cos_cache_calc_cu(int head_size, int max_seq_len, const tensor::Tensor&
 
     sin_cos_calc_kernel<<<blocks, threads, 0, cuda_stream>>>(
         head_size, max_seq_len, const_cast<float*>(sin_cache.ptr<float>()),
-        const_cast<float*>(cos_cache.ptr<float>()), rope_theta);
+        const_cast<float*>(cos_cache.ptr<float>()), rope_theta, has_rope_scaling, scaling_factor,
+        low_freq_factor, high_freq_factor, original_max_pos);
 }
 
 /**

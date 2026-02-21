@@ -95,4 +95,61 @@ void rope_kernel_cpu(int32_t dim, int32_t kv_dim, int32_t head_size, const tenso
 
 REGISTER_KERNEL(rope, kDeviceCPU, rope_kernel_cpu)
 
+/**
+ * @brief CPU Sin/Cos Cache 预计算（支持 LLaMA3 RoPE Scaling）
+ *
+ * 在 CPU 上生成 [max_seq_len, head_size] 的 Sin/Cos 查找表。
+ * 与 CUDA 版本逻辑完全一致，用于 CPU 推理路径。
+ */
+void sin_cos_cache_calc_cpu(int32_t head_size, int32_t max_seq_len, const tensor::Tensor& sin_cache,
+                            const tensor::Tensor& cos_cache, float rope_theta,
+                            bool has_rope_scaling, float scaling_factor, float low_freq_factor,
+                            float high_freq_factor, int32_t original_max_pos,
+                            [[maybe_unused]] void* stream) {
+    CHECK(!sin_cache.is_empty());
+    CHECK(!cos_cache.is_empty());
+
+    float* sin_ptr = const_cast<float*>(sin_cache.ptr<float>());
+    float* cos_ptr = const_cast<float*>(cos_cache.ptr<float>());
+
+    int32_t half_head = head_size / 2;
+
+    // 1. 计算各频率（含可选 RoPE scaling）
+    std::vector<float> freqs(half_head);
+    for (int p = 0; p < half_head; ++p) {
+        float freq =
+            1.0f / std::pow(rope_theta, static_cast<float>(p * 2) / static_cast<float>(head_size));
+
+        if (has_rope_scaling) {
+            float wavelen = 2.0f * static_cast<float>(M_PI) / freq;
+            float low_freq_wavelen = static_cast<float>(original_max_pos) / low_freq_factor;
+            float high_freq_wavelen = static_cast<float>(original_max_pos) / high_freq_factor;
+
+            if (wavelen >= low_freq_wavelen) {
+                freq /= scaling_factor;
+            } else if (wavelen > high_freq_wavelen) {
+                float smooth = (static_cast<float>(original_max_pos) / wavelen - low_freq_factor) /
+                               (high_freq_factor - low_freq_factor);
+                freq = (1.0f - smooth) * freq / scaling_factor + smooth * freq;
+            }
+        }
+        freqs[p] = freq;
+    }
+
+    // 2. 生成 sin/cos cache [max_seq_len, head_size]（interleaved 格式）
+    for (int pos = 0; pos < max_seq_len; ++pos) {
+        for (int p = 0; p < half_head; ++p) {
+            float val = static_cast<float>(pos) * freqs[p];
+            float s = std::sin(val);
+            float c = std::cos(val);
+            sin_ptr[pos * head_size + p * 2] = s;
+            sin_ptr[pos * head_size + p * 2 + 1] = s;
+            cos_ptr[pos * head_size + p * 2] = c;
+            cos_ptr[pos * head_size + p * 2 + 1] = c;
+        }
+    }
+}
+
+REGISTER_KERNEL(sin_cos_cache_calc, kDeviceCPU, sin_cos_cache_calc_cpu)
+
 }  // namespace kernel
