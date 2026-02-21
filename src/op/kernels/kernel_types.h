@@ -52,18 +52,19 @@ using MatmulKernelFn = void (*)(const tensor::Tensor& input, const tensor::Tenso
                                 void* stream_or_config);
 
 /**
- * @brief 量化矩阵乘法 (Int8) Kernel 协议
- * @details 用于 W8A32 (Weight Int8, Activation FP32) 模式下的矩阵乘法
- * @param input 激活张量 (FP32)
- * @param weight 量化权重张量 (Int8)
- * @param output 输出张量 (FP32)
- * @param group_size 量化分组大小 (如 128)
- * @param scale 量化缩放因子张量
+ * @brief W8A32 分组量化矩阵乘法 Kernel 协议
+ * @details Weight Int8，Activation FP32，对称分组量化（Q8_0 格式）
+ *   output[b, n] = Σ_k input[b, k] × (weight[n, k] × scale[n, k/group_size])
+ * @param input     激活张量 [batch, K]，FP32
+ * @param weight    量化权重 [N, K]，Int8
+ * @param output    输出张量 [batch, N]，FP32
+ * @param group_size 分组大小（如 128，每 group_size 个权重共享一个 scale）
+ * @param scale     缩放因子 [N, K/group_size]，FP32
  * @param stream_or_config CUDA 配置指针 (CudaConfig*)
  */
-// using MatmulQuantKernelFn = void (*)(const tensor::Tensor& input, const tensor::Tensor& weight,
-//                                      const tensor::Tensor& output, int32_t group_size,
-//                                      const tensor::Tensor& scale, void* stream_or_config);
+using MatmulQuantKernelFn = void (*)(const tensor::Tensor& input, const tensor::Tensor& weight,
+                                     const tensor::Tensor& output, int32_t group_size,
+                                     const tensor::Tensor& scale, void* stream_or_config);
 
 /**
  * @brief Embedding 查表 Kernel 协议

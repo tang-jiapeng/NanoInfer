@@ -124,7 +124,15 @@ base::Status MatmulLayer::forward() {
         CHECK(cuda_config_ != nullptr);
     }
     if (is_quant_layer_) {
-        return base::error::InternalError("Quantized matmul kernel is not implemented yet");
+        auto matmul_quant_kernel =
+            kernel::KernelRegistry::instance().get<kernel::MatmulQuantKernelFn>("matmul_quant",
+                                                                                device_type_);
+        if (!matmul_quant_kernel) {
+            return base::error::InternalError("Matmul quant kernel not found for device: " +
+                                              std::to_string(static_cast<int>(device_type_)));
+        }
+        matmul_quant_kernel(get_input(0), get_weight(0), get_output(0), group_size_, scales_,
+                            cuda_config_ ? cuda_config_.get() : nullptr);
     } else {
         auto matmul_kernel =
             kernel::KernelRegistry::instance().get<kernel::MatmulKernelFn>("matmul", device_type_);

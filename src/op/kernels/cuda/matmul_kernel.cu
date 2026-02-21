@@ -89,4 +89,112 @@ void matmul_kernel_cu(const tensor::Tensor& input, const tensor::Tensor& weight,
 }
 
 REGISTER_KERNEL(matmul, kDeviceCUDA, matmul_kernel_cu);
+
+// =============================================================================
+// W8A32 分组量化 Matmul (Weight Int8, Activation FP32)
+// =============================================================================
+
+constexpr int QUANT_BLOCK = 256;
+
+/**
+ * @brief W8A32 分组量化矩阵乘法 CUDA Kernel
+ *
+ * 每个 Block 计算输出矩阵中的一个元素 output[b, n]：
+ *   output[b, n] = Σ_k input[b,k] × (int8_to_float(weight[n,k]) × scale[n, k/group_size])
+ *
+ * 线程块内通过共享内存完成并行归约（树形规约）。
+ *
+ * Grid:  (batch, N)    — 每个 Block 对应输出矩阵一个 (行, 列) 元素
+ * Block: (QUANT_BLOCK) — 256 个线程并行对 K 维度做归约
+ *
+ * @param input     [batch, K] FP32
+ * @param weight    [N, K] Int8（行主序，每行代表一个输出神经元）
+ * @param scales    [N, K/group_size] FP32（每行对应 weight 每行的 scale 序列）
+ * @param output    [batch, N] FP32
+ * @param N         输出维度
+ * @param K         输入维度
+ * @param group_size 量化分组大小
+ */
+__global__ void matmul_quant_kernel(const float* __restrict__ input,
+                                    const int8_t* __restrict__ weight,
+                                    const float* __restrict__ scales, float* __restrict__ output,
+                                    int32_t N, int32_t K, int32_t group_size) {
+    __shared__ float smem[QUANT_BLOCK];
+
+    int b = blockIdx.x;  // batch 索引
+    int n = blockIdx.y;  // 输出神经元索引
+
+    const float* inp = input + b * K;      // 当前 batch 的输入行
+    const int8_t* w_row = weight + n * K;  // 当前输出神经元对应的权重行
+    int num_groups = K / group_size;
+    const float* s_row = scales + n * num_groups;  // 对应 scale 行
+
+    // 每个线程负责 K/QUANT_BLOCK 个元素的累加
+    float acc = 0.0f;
+    for (int k = threadIdx.x; k < K; k += QUANT_BLOCK) {
+        int g = k / group_size;
+        acc += inp[k] * (static_cast<float>(w_row[k]) * s_row[g]);
+    }
+    smem[threadIdx.x] = acc;
+    __syncthreads();
+
+    // 树形并行归约：将 QUANT_BLOCK 个部分和合并为单个值
+    for (int stride = QUANT_BLOCK / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            smem[threadIdx.x] += smem[threadIdx.x + stride];
+        }
+        __syncthreads();
+    }
+
+    if (threadIdx.x == 0) {
+        output[b * N + n] = smem[0];
+    }
+}
+
+/**
+ * @brief W8A32 分组量化 Matmul Host 包装函数
+ *
+ * 将量化权重和缩放因子传入 CUDA kernel，计算:
+ *   output = dequant(weight) × input^T
+ * 其中 dequant(weight[n,k]) = int8_to_float(weight[n,k]) × scale[n, k/group_size]
+ *
+ * @param input      激活 Tensor [batch, K]，FP32，CUDA 设备
+ * @param weight     量化权重 Tensor [N, K]，Int8，CUDA 设备
+ * @param output     输出 Tensor [batch, N]，FP32，CUDA 设备
+ * @param group_size 量化分组大小（K 需整除 group_size）
+ * @param scale      缩放因子 Tensor [N×K/group_size]，FP32，CUDA 设备
+ * @param config     CudaConfig 指针（提供 CUDA stream）
+ */
+void matmul_kernel_cu_fp32int8(const tensor::Tensor& input, const tensor::Tensor& weight,
+                               const tensor::Tensor& output, int32_t group_size,
+                               const tensor::Tensor& scale, void* config) {
+    CHECK(!input.is_empty());
+    CHECK(!weight.is_empty());
+    CHECK(!scale.is_empty());
+    CHECK_GT(group_size, 0);
+    CHECK(config != nullptr);
+
+    CHECK(input.device_type() == base::DeviceType::kDeviceCUDA);
+    CHECK(weight.device_type() == base::DeviceType::kDeviceCUDA);
+    CHECK(output.device_type() == base::DeviceType::kDeviceCUDA);
+
+    int32_t batch = static_cast<int32_t>(input.get_dim(0));
+    int32_t K = static_cast<int32_t>(input.get_dim(1));
+    int32_t N = static_cast<int32_t>(weight.get_dim(0));
+
+    CHECK_EQ(static_cast<int32_t>(weight.get_dim(1)), K) << "Weight K-dim mismatch";
+    CHECK_EQ(K % group_size, 0) << "K must be divisible by group_size";
+    CHECK_EQ(static_cast<int32_t>(scale.size()), N * (K / group_size))
+        << "Scale size mismatch: expected " << N * (K / group_size) << " got " << scale.size();
+
+    cudaStream_t stream = static_cast<CudaConfig*>(config)->stream;
+
+    // Grid = (batch, N)：每个 Block 计算一个输出元素
+    dim3 grid(static_cast<uint32_t>(batch), static_cast<uint32_t>(N));
+    matmul_quant_kernel<<<grid, QUANT_BLOCK, 0, stream>>>(
+        input.ptr<float>(), weight.ptr<int8_t>(), scale.ptr<float>(),
+        const_cast<float*>(output.ptr<float>()), N, K, group_size);
+}
+
+REGISTER_KERNEL(matmul_quant, kDeviceCUDA, matmul_kernel_cu_fp32int8);
 }  // namespace kernel
