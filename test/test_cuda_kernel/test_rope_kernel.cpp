@@ -127,10 +127,10 @@ TEST_F(RoPEKernelTest, SinCosCacheGeneration) {
     tensor::Tensor t_sin(base::DataType::kDataTypeFp32, max_seq_len, head_size, true, gpu_alloc_);
     tensor::Tensor t_cos(base::DataType::kDataTypeFp32, max_seq_len, head_size, true, gpu_alloc_);
 
-    // 2. 运行 GPU Kernel (生成表)
+    // 2. 运行 GPU Kernel (生成表，不启用 RoPE scaling)
     auto sincos_cu = kernel::KernelRegistry::instance().get<kernel::SinCosCacheCalcKernelFn>(
         "sin_cos_cache_calc", base::DeviceType::kDeviceCUDA);
-    sincos_cu(head_size, max_seq_len, t_sin, t_cos, 10000.0f, nullptr);
+    sincos_cu(head_size, max_seq_len, t_sin, t_cos, 10000.0f, false, 1.0f, 1.0f, 1.0f, 0, nullptr);
     cudaDeviceSynchronize();
 
     // 3. 拷贝回 CPU
@@ -179,4 +179,62 @@ TEST_F(RoPEKernelTest, SinCosCacheGeneration) {
     // Sin(1.0) approx 0.8414
     EXPECT_NEAR(h_sin_gpu[idx_0], h_sin_gpu[idx_1], 1e-6)
         << "Llama property failed: Dim 0 and Dim 1 should share the same frequency/value";
+}
+
+TEST_F(RoPEKernelTest, SinCosCacheGenerationWithLLaMA3Scaling) {
+    // 参数设置（模拟 LLaMA3.2-1B：head_size=64, rope_theta=500000）
+    int32_t head_size = 64;
+    int32_t max_seq_len = 16;
+    int32_t total_elements = head_size * max_seq_len;
+    float rope_theta = 500000.0f;
+    // LLaMA3.2-1B RoPE scaling 参数
+    float scaling_factor = 32.0f;
+    float low_freq_factor = 1.0f;
+    float high_freq_factor = 4.0f;
+    int32_t original_max_pos = 8192;
+
+    // 1. GPU Tensors
+    tensor::Tensor t_sin(base::DataType::kDataTypeFp32, max_seq_len, head_size, true, gpu_alloc_);
+    tensor::Tensor t_cos(base::DataType::kDataTypeFp32, max_seq_len, head_size, true, gpu_alloc_);
+
+    // 2. CPU Tensors（用于对比验证）
+    tensor::Tensor c_sin(base::DataType::kDataTypeFp32, max_seq_len, head_size, true, cpu_alloc_);
+    tensor::Tensor c_cos(base::DataType::kDataTypeFp32, max_seq_len, head_size, true, cpu_alloc_);
+
+    // 3. 运行 GPU Kernel（启用 RoPE scaling）
+    auto sincos_cu = kernel::KernelRegistry::instance().get<kernel::SinCosCacheCalcKernelFn>(
+        "sin_cos_cache_calc", base::DeviceType::kDeviceCUDA);
+    sincos_cu(head_size, max_seq_len, t_sin, t_cos, rope_theta, true, scaling_factor,
+              low_freq_factor, high_freq_factor, original_max_pos, nullptr);
+    cudaDeviceSynchronize();
+
+    // 4. 运行 CPU Kernel（启用 RoPE scaling）
+    auto sincos_cpu = kernel::KernelRegistry::instance().get<kernel::SinCosCacheCalcKernelFn>(
+        "sin_cos_cache_calc", base::DeviceType::kDeviceCPU);
+    sincos_cpu(head_size, max_seq_len, c_sin, c_cos, rope_theta, true, scaling_factor,
+               low_freq_factor, high_freq_factor, original_max_pos, nullptr);
+
+    // 5. 拷贝 GPU 结果回 CPU
+    std::vector<float> h_sin_gpu(total_elements), h_cos_gpu(total_elements);
+    cudaMemcpy(h_sin_gpu.data(), t_sin.ptr<void>(), total_elements * sizeof(float),
+               cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_cos_gpu.data(), t_cos.ptr<void>(), total_elements * sizeof(float),
+               cudaMemcpyDeviceToHost);
+
+    const float* h_sin_cpu = c_sin.ptr<float>();
+    const float* h_cos_cpu = c_cos.ptr<float>();
+
+    // 6. CPU 与 GPU 结果对比
+    for (int i = 0; i < total_elements; ++i) {
+        EXPECT_NEAR(h_sin_cpu[i], h_sin_gpu[i], 1e-4) << "Sin mismatch at idx=" << i;
+        EXPECT_NEAR(h_cos_cpu[i], h_cos_gpu[i], 1e-4) << "Cos mismatch at idx=" << i;
+    }
+
+    // 7. 验证低频维度确实被缩放（最后一个维度频率最低）
+    // 最后一个 head_dim pair (p = head_size/2 - 1) 对应最低频率，wavelen 应 > low_freq_wavelen
+    // 因此其频率会被 /= scaling_factor，导致 sin/cos 值接近 0 (角度接近 0)
+    int last_dim_pos1_idx = 1 * head_size + (head_size - 1);  // pos=1, 最后一个维度
+    // 低频维度经过 scaling 后 freq 很小，pos=1 时角度接近 0
+    EXPECT_NEAR(h_sin_cpu[last_dim_pos1_idx], 0.0f, 0.1f)
+        << "Low-freq dim at pos=1 should have near-zero angle after scaling";
 }

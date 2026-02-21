@@ -10,6 +10,8 @@
  * 支持 GQA/MQA：K 只旋转前 kv_dim 元素（而 Q 旋转全部 dim）。
  */
 #include <armadillo>
+#include <cmath>
+#include <vector>
 #include "../kernel_registry.h"
 
 namespace kernel {
