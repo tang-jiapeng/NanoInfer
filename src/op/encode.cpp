@@ -169,13 +169,13 @@ std::string BpeEncodeLayer::decode(int32_t token_id) const {
 /**
  * @brief 解码：Token ID 序列 → 完整字符串
  *
- * tiktoken._decode_native() 直接返回原始字节（decoder_ 键已是原始字节），
- * 即空格以 0x20 呈现，无需任何后处理。
+ * skip_special=true：跳过 BOS/EOS/<|eot_id|> 等特殊 token，
+ * 等价于 HuggingFace tokenizer.decode(skip_special_tokens=True)。
  */
 std::string BpeEncodeLayer::decode(const std::vector<int32_t>& token_ids) const {
     CHECK(tiktoken_ != nullptr);
     std::vector<int> ids(token_ids.begin(), token_ids.end());
-    return tiktoken_->decode(ids);
+    return tiktoken_->decode(ids, /*skip_special=*/true);
 }
 
 /** @brief 判断 token 是否为停止符（<|end_of_text|> 或 <|eot_id|>） */

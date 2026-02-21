@@ -151,8 +151,8 @@ class tiktoken {
         return byte_pair_encode(text, encoder_);
     }
 
-    auto decode(const std::vector<int>& tokens) const -> std::string {
-        return _decode_native(tokens);
+    auto decode(const std::vector<int>& tokens, bool skip_special = false) const -> std::string {
+        return _decode_native(tokens, skip_special);
     }
 
    private:
@@ -229,7 +229,8 @@ class tiktoken {
         return {ret, last_piece_token_len};
     }
 
-    auto _decode_native(const std::vector<int>& tokens) const -> std::string {
+    auto _decode_native(const std::vector<int>& tokens,
+                        bool skip_special = false) const -> std::string {
         std::string ret;
         ret.reserve(tokens.size() * 2);
         for (auto token : tokens) {
@@ -240,6 +241,7 @@ class tiktoken {
             } else {
                 iter = special_tokens_decoder.find(token);
                 if (iter != special_tokens_decoder.end()) {
+                    if (skip_special) continue;  // 跳过特殊 token（BOS/EOS 等）
                     token_bytes = iter->second;
                 } else {
                     throw std::runtime_error("unknown token: " + std::to_string(token));
