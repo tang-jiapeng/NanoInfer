@@ -35,7 +35,7 @@ struct ModelPreset {
 
 static ModelPreset get_preset(const std::string& name) {
     if (name == "llama3") {
-        return {"./models/llama3/llama3_fp32.bin", "./models/llama3/tokenizer.bin",
+        return {"./models/llama3/llama3_fp32.bin", "./models/llama3/tokenizer.json",
                 base::ModelType::kModelTypeLLaMA3, base::TokenizerType::kEncodeBpe};
     }
     // 默认 llama2

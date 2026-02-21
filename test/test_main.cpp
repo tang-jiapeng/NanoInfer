@@ -40,7 +40,8 @@ static const std::unordered_map<std::string, std::string> kModuleFilterMap = {
     // Layer 测试 (op/)
     {"layer",
      "LayerBaseTest.*:VecAddLayerTest.*:RmsNormLayerTest.*"
-     ":MatmulLayerTest.*:SwiGLULayerTest.*:EmbeddingLayerTest.*"},
+     ":MatmulLayerTest.*:SwiGLULayerTest.*:EmbeddingLayerTest.*"
+     ":BpeEncodeLayerTest.*"},
     // Model 测试
     {"model", "TinyLlamaTest.*"},
     // 快捷组合

@@ -147,10 +147,17 @@ base::Status Model::generate_model_infos(const ModelConfig& config) const {
             config_->eos_token_id_ = 2;
             break;
         case base::ModelType::kModelTypeLLaMA3:
-            config_->norm_eps_ = 1e-6f;
+            config_->norm_eps_ = 1e-5f;
             config_->rope_theta_ = 500000.0f;
             config_->bos_token_id_ = 128000;
             config_->eos_token_id_ = 128001;
+
+            // LLaMA3.2 RoPE scaling (llama3 type)
+            config_->has_rope_scaling_ = true;
+            config_->rope_scaling_factor_ = 32.0f;
+            config_->rope_scaling_low_freq_factor_ = 1.0f;
+            config_->rope_scaling_high_freq_factor_ = 4.0f;
+            config_->rope_scaling_original_max_pos_ = 8192;
             break;
         default:
             // 其它模型由 tokenizer 提供 bos/eos

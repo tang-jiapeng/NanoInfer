@@ -46,6 +46,13 @@ struct TransformerConfig {
 
     float rope_theta_ = 10000.0f;  ///< RoPE 基础频率 (LLama2=10000, LLama3=500000)
     float norm_eps_ = 1e-5f;       ///< RMSNorm epsilon
+
+    /// RoPE Scaling（LLaMA3.1/3.2 使用 llama3-type 频率缩放）
+    bool has_rope_scaling_ = false;
+    float rope_scaling_factor_ = 1.0f;
+    float rope_scaling_low_freq_factor_ = 1.0f;
+    float rope_scaling_high_freq_factor_ = 1.0f;
+    int32_t rope_scaling_original_max_pos_ = 0;
 };
 
 /// @brief 推理中间 Buffer 类型枚举

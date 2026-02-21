@@ -2,9 +2,17 @@
 """
 NanoInfer HuggingFace 精度验证 — Greedy (argmax) 解码
 用法：
-  python eval/hf_verify.py --model_dir ./models/tinyllama_hf
-  python eval/hf_verify.py --model_dir ./models/tinyllama_hf --tokenizer ./models/llama2/tokenizer.model
-  python eval/hf_verify.py --model_dir ./models/tinyllama_hf --mode single
+  # LLaMA2（本地权重或 Hub）
+  python eval/hf_verify.py --model llama2
+  python eval/hf_verify.py --model llama2 --model_dir ./models/tinyllama_hf
+  python eval/hf_verify.py --model llama2 --model_dir ./models/tinyllama_hf --tokenizer ./models/llama2/tokenizer.model
+
+  # LLaMA3（直接从 Hub 下载）
+  python eval/hf_verify.py --model llama3
+  python eval/hf_verify.py --model llama3 --model_dir meta-llama/Llama-3.2-1B
+
+  # 只跑单条 / 多条
+  python eval/hf_verify.py --model llama3 --mode single
 """
 
 import argparse
@@ -13,6 +21,23 @@ from pathlib import Path
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, LlamaTokenizer
+
+# ── 模型预设（对应 C++ demo 里的 get_preset）─────────────────────────────────
+# model_dir: 本地路径或 Hub model-id（可被 --model_dir 命令行参数覆盖）
+# trust    : 是否需要 trust_remote_code（LLaMA3 tiktoken tokenizer 需要）
+# fp32     : 强制 float32 以与 C++ fp32 权重对齐
+PRESETS = {
+    "llama2": {
+        "model_dir": "./models/llama2",  # 本地 HF 权重目录
+        "tokenizer": None,  # 可被 --tokenizer 覆盖
+        "trust": False,
+    },
+    "llama3": {
+        "model_dir": "meta-llama/Llama-3.2-1B",  # Hub id，可被 --model_dir 覆盖
+        "tokenizer": None,
+        "trust": True,
+    },
+}
 
 # ── Prompts（与 C++ demo 完全一致）─────────────────────────────────────────
 # demo/llama2.cpp — MAX_NEW_TOKENS = 128
@@ -37,8 +62,10 @@ PROMPTS_BATCHED = [
 ]
 
 
-def load(model_dir: str, tokenizer_path: str | None, device: str):
-    print(f"Loading model : {model_dir}")
+def load(model_dir: str, tokenizer_path: str | None, trust: bool):
+    print(f"Loading model : {model_dir}  (trust_remote_code={trust})")
+
+    # ── Tokenizer ──
     if tokenizer_path:
         p = Path(tokenizer_path)
         tok = (
@@ -47,10 +74,15 @@ def load(model_dir: str, tokenizer_path: str | None, device: str):
             else LlamaTokenizer.from_pretrained(str(p), legacy=True)
         )
     else:
-        tok = AutoTokenizer.from_pretrained(model_dir, legacy=True)
+        tok = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=trust)
 
+    # ── Model ──
+    # fp32 与 C++ fp32 权重对齐；llama3 用 device_map="auto" 自动分配显存
     model = AutoModelForCausalLM.from_pretrained(
-        model_dir, torch_dtype=torch.float32, device_map=device
+        model_dir,
+        torch_dtype=torch.float32,
+        device_map="auto",
+        trust_remote_code=trust,
     ).eval()
 
     print(
@@ -60,16 +92,15 @@ def load(model_dir: str, tokenizer_path: str | None, device: str):
     return model, tok
 
 
-def infer(
-    model, tok, prompt: str, max_new_tokens: int, device: str
-) -> tuple[str, int, float]:
+def infer(model, tok, prompt: str, max_new_tokens: int) -> tuple[str, int, float]:
     """Greedy decode，返回 (生成文本, 生成 token 数, 耗时 ms)。"""
-    ids = tok.encode(prompt, add_special_tokens=True, return_tensors="pt").to(device)
-    prompt_len = ids.shape[-1]
+    # tokenizer() 同时返回 input_ids + attention_mask，两种模型均适用
+    inputs = tok(prompt, return_tensors="pt").to(model.device)
+    prompt_len = inputs["input_ids"].shape[-1]
     t0 = time.perf_counter()
     with torch.no_grad():
         out = model.generate(
-            ids,
+            **inputs,
             max_new_tokens=max_new_tokens,
             do_sample=False,  # greedy = argmax，与 C++ ArgmaxSampler 完全一致
             temperature=1.0,
@@ -81,12 +112,12 @@ def infer(
     return text, len(new_ids), elapsed_ms
 
 
-def run(model, tok, prompts: list, device: str, title: str):
+def run(model, tok, prompts: list, title: str):
     print("=" * 65)
     print(f"  {title}")
     print("=" * 65)
     for i, (prompt, max_new) in enumerate(prompts):
-        text, gen_tokens, ms = infer(model, tok, prompt, max_new, device)
+        text, gen_tokens, ms = infer(model, tok, prompt, max_new)
         print(f"\n[{i}] Prompt   : {prompt}")
         print(f"    Output   : {text}")
         print(
@@ -98,23 +129,38 @@ def run(model, tok, prompts: list, device: str, title: str):
 
 def main():
     ap = argparse.ArgumentParser(description="NanoInfer HuggingFace 精度验证")
-    ap.add_argument("--model_dir", required=True, help="HF 模型目录或 Hub model-id")
     ap.add_argument(
-        "--tokenizer", default=None, help=".model 文件或含 tokenizer 的目录"
+        "--model",
+        choices=["llama2", "llama3"],
+        default="llama2",
+        help="模型类型，决定默认路径与 tokenizer 行为（默认 llama2）",
     )
-    ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument(
+        "--model_dir",
+        default=None,
+        help="覆盖预设的模型路径/Hub id（可选）",
+    )
+    ap.add_argument(
+        "--tokenizer",
+        default=None,
+        help="覆盖预设的 tokenizer 路径，仅 llama2 本地 .model 文件时需要",
+    )
     ap.add_argument("--mode", choices=["single", "batched", "all"], default="all")
     args = ap.parse_args()
 
-    model, tok = load(args.model_dir, args.tokenizer, args.device)
+    preset = PRESETS[args.model]
+    model_dir = args.model_dir or preset["model_dir"]
+    tok_path = args.tokenizer or preset["tokenizer"]
+    trust = preset["trust"]
+
+    model, tok = load(model_dir, tok_path, trust)
 
     if args.mode in ("single", "all"):
         run(
             model,
             tok,
             [PROMPT_SINGLE],
-            args.device,
-            "demo/llama2.cpp  [single, max_new=128]",
+            f"demo/llama2.cpp  [{args.model}, single, max_new=128]",
         )
 
     if args.mode in ("batched", "all"):
@@ -122,8 +168,7 @@ def main():
             model,
             tok,
             PROMPTS_BATCHED,
-            args.device,
-            "demo/batched_infer_multi_prompts.cpp  [4 prompts, max_new=64]",
+            f"demo/batched_infer_multi_prompts.cpp  [{args.model}, 4 prompts, max_new=64]",
         )
 
 

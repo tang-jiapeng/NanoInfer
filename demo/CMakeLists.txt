@@ -1,8 +1,8 @@
-add_executable(llama2_infer llama2.cpp)
-target_link_directories(llama2_infer PUBLIC ${PROJECT_SOURCE_DIR}/lib)
-target_link_libraries(llama2_infer llama)
+add_executable(llama_infer llama.cpp)
+target_link_directories(llama_infer PUBLIC ${PROJECT_SOURCE_DIR}/lib)
+target_link_libraries(llama_infer llama)
 
-set_target_properties(llama2_infer PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+set_target_properties(llama_infer PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 
 add_executable(batched_infer_multi_prompts batched_infer_multi_prompts.cpp)
 target_link_directories(batched_infer_multi_prompts PUBLIC ${PROJECT_SOURCE_DIR}/lib)

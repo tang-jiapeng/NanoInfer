@@ -2,7 +2,7 @@
  * @file llama.cpp
  * @brief LLaMA 模型实现（初始化、前向推理、权重加载）
  *
- * 本文件是 LLaMA2 模型的核心实现，包含以下主要功能：
+ * 本文件是 LLaMA2/3 模型的核心实现，包含以下主要功能：
  *
  * 1. 模型初始化 (`init`):
  *    CUDA 上下文创建 → 权重文件加载 → 层迁移至 GPU → RoPE Cache 预计算 → 注入 Attention
@@ -26,6 +26,7 @@
  *    rmsnorm_layers_[2N]                    = Final Norm
  */
 #include "nanoinfer/model/llama.h"
+#include <cmath>
 #include "../op/kernels/kernel_registry.h"
 #include "../op/kernels/kernel_types.h"
 #include "nanoinfer/op/add.h"
@@ -92,19 +93,71 @@ LLamaModel::LLamaModel(base::TokenizerType tokenizer_type, base::ModelType model
 /**
  * @brief 预计算 RoPE (Rotary Position Embedding) 的 sin/cos 缓存
  *
- * 计算公式（对每个位置 pos 和维度下标 i）：
- *   freq_i = 1.0 / (10000^(2*⌊i/2⌋ / head_size))
- *   sin_cache[pos, i] = sin(pos × freq_i)
- *   cos_cache[pos, i] = cos(pos × freq_i)
+ * 1. 先在 CPU 上计算全部频率（支持 llama3-type RoPE scaling）
+ * 2. 生成 [max_seq_len, head_size] 的 sin/cos 查找表
+ * 3. 若推理设备为 CUDA，将结果拷贝至 GPU
  *
- * 输出 shape: [max_seq_len, head_size]
- * CUDA 模式下使用专用 Kernel 计算，CPU 模式下降级为循环实现。
+ * LLaMA3.2 RoPE Scaling 算法（等价于 HuggingFace transformers）：
+ *   - wavelen < high_freq_wavelen  → 保持原频率（高频维度）
+ *   - wavelen > low_freq_wavelen   → freq /= factor（低频维度）
+ *   - 中间区域                      → 平滑插值
+ *
  * 计算完成后注入 AttentionLayer，在 RoPE 阶段通过 positions 索引访问。
  */
 void LLamaModel::init_rope_cache() {
     int32_t head_size = config_->head_size_;
     int32_t max_seq_len = config_->seq_len_;
+    int32_t half_head = head_size / 2;
 
+    // ---- 1. 在 CPU 上计算各频率对（含可选 RoPE scaling） ----
+    std::vector<float> freqs(half_head);
+    for (int p = 0; p < half_head; ++p) {
+        float freq = 1.0f / std::pow(config_->rope_theta_,
+                                     static_cast<float>(p * 2) / static_cast<float>(head_size));
+
+        // LLaMA3.1/3.2 llama3-type RoPE frequency scaling
+        if (config_->has_rope_scaling_) {
+            float wavelen = 2.0f * static_cast<float>(M_PI) / freq;
+            float low_freq_wavelen = static_cast<float>(config_->rope_scaling_original_max_pos_) /
+                                     config_->rope_scaling_low_freq_factor_;
+            float high_freq_wavelen = static_cast<float>(config_->rope_scaling_original_max_pos_) /
+                                      config_->rope_scaling_high_freq_factor_;
+
+            if (wavelen >= low_freq_wavelen) {
+                // 低频维度：直接除以 factor（大幅降低频率）
+                freq /= config_->rope_scaling_factor_;
+            } else if (wavelen > high_freq_wavelen) {
+                // 中间区域：平滑插值
+                float smooth =
+                    (static_cast<float>(config_->rope_scaling_original_max_pos_) / wavelen -
+                     config_->rope_scaling_low_freq_factor_) /
+                    (config_->rope_scaling_high_freq_factor_ -
+                     config_->rope_scaling_low_freq_factor_);
+                freq = (1.0f - smooth) * freq / config_->rope_scaling_factor_ + smooth * freq;
+            }
+            // wavelen < high_freq_wavelen: 高频维度保持不变
+        }
+        freqs[p] = freq;
+    }
+
+    // ---- 2. 生成 sin/cos cache [max_seq_len, head_size] ----
+    std::vector<float> h_sin(static_cast<size_t>(max_seq_len) * head_size);
+    std::vector<float> h_cos(static_cast<size_t>(max_seq_len) * head_size);
+
+    for (int pos = 0; pos < max_seq_len; ++pos) {
+        for (int p = 0; p < half_head; ++p) {
+            float val = static_cast<float>(pos) * freqs[p];
+            float s = std::sin(val);
+            float c = std::cos(val);
+            // interleaved 约定：相邻 pair 共享同一频率
+            h_sin[pos * head_size + p * 2] = s;
+            h_sin[pos * head_size + p * 2 + 1] = s;
+            h_cos[pos * head_size + p * 2] = c;
+            h_cos[pos * head_size + p * 2 + 1] = c;
+        }
+    }
+
+    // ---- 3. 分配设备 Tensor 并拷贝 ----
     std::shared_ptr<base::DeviceAllocator> allocator;
     if (device_type_ == base::DeviceType::kDeviceCUDA) {
         allocator = base::CUDADeviceAllocatorFactory::get_instance();
@@ -118,33 +171,12 @@ void LLamaModel::init_rope_cache() {
         tensor::Tensor(base::DataType::kDataTypeFp32, max_seq_len, head_size, true, allocator);
 
     if (device_type_ == base::DeviceType::kDeviceCUDA) {
-        auto sin_cos_cal_kernel =
-            kernel::KernelRegistry::instance().get<kernel::SinCosCacheCalcKernelFn>(
-                "sin_cos_cache_calc", device_type_);
-        if (!sin_cos_cal_kernel) {
-            LOG(FATAL) << "SinCos Cache Calc kernel not found for device: "
-                       << static_cast<int>(device_type_);
-            return;
-        }
-
-        sin_cos_cal_kernel(head_size, max_seq_len, sin_cache_, cos_cache_, config_->rope_theta_,
-                           cuda_config_ ? cuda_config_->stream : nullptr);
-
-        cudaStreamSynchronize(static_cast<cudaStream_t>(cuda_config_->stream));
+        cudaMemcpy(sin_cache_.ptr<void>(), h_sin.data(), h_sin.size() * sizeof(float),
+                   cudaMemcpyHostToDevice);
+        cudaMemcpy(cos_cache_.ptr<void>(), h_cos.data(), h_cos.size() * sizeof(float),
+                   cudaMemcpyHostToDevice);
+        if (cuda_config_) cudaStreamSynchronize(cuda_config_->stream);
     } else {
-        // CPU 降级实现，用于 CPU 推理
-        std::vector<float> h_sin(max_seq_len * head_size);
-        std::vector<float> h_cos(max_seq_len * head_size);
-        for (int pos = 0; pos < max_seq_len; ++pos) {
-            for (int i = 0; i < head_size; ++i) {
-                float freq =
-                    1.0f / std::pow(config_->rope_theta_,
-                                    static_cast<float>(i / 2 * 2) / static_cast<float>(head_size));
-                float val = static_cast<float>(pos) * freq;
-                h_sin[pos * head_size + i] = std::sin(val);
-                h_cos[pos * head_size + i] = std::cos(val);
-            }
-        }
         std::memcpy(sin_cache_.ptr<void>(), h_sin.data(), h_sin.size() * sizeof(float));
         std::memcpy(cos_cache_.ptr<void>(), h_cos.data(), h_cos.size() * sizeof(float));
     }

@@ -22,6 +22,7 @@ class ModelArgs:
     norm_eps: float = 1e-5
     max_seq_len: int = 2048
     dropout: float = 0.0
+    rope_theta: float = 10000.0  # RoPE base frequency (LLaMA2=10000, LLaMA3=500000)
 
 
 class RMSNorm(torch.nn.Module):

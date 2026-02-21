@@ -1,11 +1,12 @@
+#include "nanoinfer/model/llama.h"
 #include <glog/logging.h>
 #include <chrono>
 #include <iostream>
 #include <numeric>
+#include <sstream>
 #include <string>
 #include <vector>
 #include "nanoinfer/base/base.h"
-#include "nanoinfer/model/llama.h"
 #include "nanoinfer/sampler/argmax_sampler.h"
 
 // ----------------------------------------------------------------------------------
@@ -27,7 +28,7 @@ struct ModelPreset {
 
 static ModelPreset get_preset(const std::string& name) {
     if (name == "llama3") {
-        return {"./models/llama3/llama3_fp32.bin", "./models/llama3/tokenizer.bin",
+        return {"./models/llama3/llama3_fp32.bin", "./models/llama3/tokenizer.json",
                 base::ModelType::kModelTypeLLaMA3, base::TokenizerType::kEncodeBpe};
     }
     // 默认 llama2
@@ -118,6 +119,18 @@ int main(int argc, char** argv) {
     std::vector<int32_t> input_ids = model->encode(prompt);
     LOG(INFO) << "Prompt: \"" << prompt << "\"";
     LOG(INFO) << "Prompt Tokens: " << input_ids.size();
+
+    // Debug: 打印 token IDs 供对比验证
+    {
+        std::ostringstream oss;
+        oss << "[";
+        for (size_t i = 0; i < input_ids.size(); ++i) {
+            if (i > 0) oss << ", ";
+            oss << input_ids[i];
+        }
+        oss << "]";
+        LOG(INFO) << "Token IDs: " << oss.str();
+    }
 
     // 安全检查
     if (input_ids.size() + MAX_NEW_TOKENS > MAX_SEQ_LEN) {

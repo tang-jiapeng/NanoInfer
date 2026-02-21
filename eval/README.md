@@ -50,13 +50,5 @@ python eval/hf_verify.py \
 | `--mode single` | `demo/llama2.cpp` |
 | `--mode batched` | `demo/batched_infer_multi_prompts.cpp` |
 
-## 验证方法
-
-1. 在 C++ demo 中添加打印语句，输出每步生成的 token ID（`next_token_id`）。
-2. 运行 `hf_verify.py --verbose`，查看 `[decode step N] id=XXXX` 行。
-3. 逐步对比两侧 token ID：
-   - **完全一致** → 精度验证通过 ✓  
-   - **某步开始不一致** → 说明该步之前的累积误差导致了分叉，需定位具体算子。
-
 > **注意**：C++ 使用 `float32`，HF 脚本默认也用 `torch.float32` 以消除 dtype 差异带来的误差。
 > 若使用 `bfloat16` 权重，微小的数值差异可能导致极少数 token 分叉，属正常现象。
