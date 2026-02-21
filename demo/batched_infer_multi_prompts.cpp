@@ -12,8 +12,6 @@
 // ----------------------------------------------------------------------------------
 // 配置参数
 // ----------------------------------------------------------------------------------
-const std::string MODEL_PATH = "./models/llama2/llama2_fp32.bin";
-const std::string TOKEN_PATH = "./models/llama2/tokenizer.model";
 
 // Engine 参数
 const int32_t MAX_BATCH_SIZE = 8;        // 最大并发 Batch (decode 阶段的序列数)
@@ -24,6 +22,26 @@ const int32_t NUM_CACHE_BLOCKS = 1024;   // 显存池 Block 总数
 
 // 生成参数
 const int32_t MAX_NEW_TOKENS = 64;  // 每个请求最多生成的 Token 数
+
+// ----------------------------------------------------------------------------------
+// 模型预设配置
+// ----------------------------------------------------------------------------------
+struct ModelPreset {
+    std::string model_path;
+    std::string token_path;
+    base::ModelType model_type;
+    base::TokenizerType tokenizer_type;
+};
+
+static ModelPreset get_preset(const std::string& name) {
+    if (name == "llama3") {
+        return {"./models/llama3/llama3_fp32.bin", "./models/llama3/tokenizer.bin",
+                base::ModelType::kModelTypeLLaMA3, base::TokenizerType::kEncodeBpe};
+    }
+    // 默认 llama2
+    return {"./models/llama2/llama2_fp32.bin", "./models/llama2/tokenizer.model",
+            base::ModelType::kModelTypeLLaMA2, base::TokenizerType::kEncodeSpe};
+}
 
 // ----------------------------------------------------------------------------------
 // Per-Request 性能追踪
@@ -85,14 +103,22 @@ int main(int argc, char** argv) {
     FLAGS_logtostderr = true;
     FLAGS_v = 0;  // 减少 VLOG 噪音，调试时可改为 1 或 2
 
+    // 解析 --model llama2|llama3 (默认 llama2)
+    std::string model_name = "llama2";
+    for (int i = 1; i < argc - 1; ++i) {
+        if (std::string(argv[i]) == "--model") {
+            model_name = argv[i + 1];
+        }
+    }
+    auto preset = get_preset(model_name);
+
     // ==================================================================
     // 1. 加载模型
     // ==================================================================
     auto t_load_start = std::chrono::high_resolution_clock::now();
-    LOG(INFO) << "Loading model from: " << MODEL_PATH;
-    auto model = std::make_unique<model::LLamaModel>(base::TokenizerType::kEncodeSpe,
-                                                     base::ModelType::kModelTypeLLaMA2, TOKEN_PATH,
-                                                     MODEL_PATH, false);
+    LOG(INFO) << "Loading model from: " << preset.model_path << "  (" << model_name << ")";
+    auto model = std::make_unique<model::LLamaModel>(preset.tokenizer_type, preset.model_type,
+                                                     preset.token_path, preset.model_path, false);
     model->init(base::DeviceType::kDeviceCUDA);
     auto t_load_end = std::chrono::high_resolution_clock::now();
     double load_time_ms =
