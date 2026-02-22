@@ -248,8 +248,8 @@ __global__ void top_k_top_p_sampling_kernel(const float* __restrict__ logits,
     float inv_sum = 1.0f / global_exp_sum;
 
     // === Step 4: Top-P 阈值计算 ===
-    // 如果启用 Top-P，需要找到累积概率达到 top_p 时的概率阈值
-    // 使用迭代二分法在概率空间找阈值
+    // Nucleus Sampling: 保留概率最高的 token 子集，使其总概率 >= top_p
+    // 通过二分法找概率阈值 p_threshold，使得 prob >= p_threshold 的 token 总概率恰好 >= top_p
     float p_threshold = 0.0f;
     if (top_p < 1.0f && top_p > 0.0f) {
         float p_lo = 0.0f, p_hi = 1.0f;
@@ -270,12 +270,13 @@ __global__ void top_k_top_p_sampling_kernel(const float* __restrict__ logits,
             float total_prob = block_reduce_sum<BLOCK_SIZE>(local_prob_sum);
 
             if (total_prob > top_p) {
-                p_lo = p_mid;  // 阈值太低，升高
+                p_lo = p_mid;  // 总概率仍 > top_p，可以提高阈值
             } else {
-                p_hi = p_mid;  // 阈值太高或刚好，降低
+                p_hi = p_mid;  // 总概率不足，需降低阈值
             }
         }
-        p_threshold = p_hi;
+        // 使用 p_lo: 保证保留的 token 总概率 >= top_p（nucleus 语义）
+        p_threshold = p_lo;
     }
 
     // === Step 5: 重新计算归一化常数（Top-K + Top-P 联合过滤后）===
@@ -323,9 +324,11 @@ __global__ void top_k_top_p_sampling_kernel(const float* __restrict__ logits,
         if (idx < vocab_size) {
             float logit = row[idx];
             if (logit >= threshold) {
-                float prob = expf(logit - global_max) * final_inv_sum;
-                if (prob >= p_threshold) {
-                    my_prob = prob;
+                float e = expf(logit - global_max);
+                // 关键：用原始概率（inv_sum）做 p_threshold 判断，
+                // 与 Step 5 保持一致；用重归一化概率（final_inv_sum）做 CDF
+                if (e * inv_sum >= p_threshold) {
+                    my_prob = e * final_inv_sum;
                 }
             }
         }

@@ -92,6 +92,9 @@ int main(int argc, char** argv) {
     google::InitGoogleLogging(argv[0]);
     FLAGS_logtostderr = true;
     FLAGS_v = 0;
+    // 抑制 Engine/Scheduler/KVCacheManager 初始化时的 INFO 日志噪音
+    // Demo 使用 std::cout 输出自己的格式化信息
+    FLAGS_minloglevel = 1;  // 只显示 WARNING 及以上
 
     // 解析参数
     std::string model_name = "llama2";
@@ -114,12 +117,16 @@ int main(int argc, char** argv) {
     std::cout << "\n  Loading model: " << model_name << " (" << (is_quant ? "int8" : "fp32")
               << ")..." << std::flush;
 
+    // 模型加载期间允许 INFO 日志（有用的模型信息）
+    FLAGS_minloglevel = 0;
     auto t_load_start = std::chrono::high_resolution_clock::now();
     auto model =
         std::make_unique<model::LLamaModel>(preset.tokenizer_type, preset.model_type,
                                             preset.token_path, preset.model_path, preset.is_quant);
     model->init(base::DeviceType::kDeviceCUDA);
     auto t_load_end = std::chrono::high_resolution_clock::now();
+    // 加载完成后再次抑制 INFO
+    FLAGS_minloglevel = 1;
     double load_ms = std::chrono::duration<double, std::milli>(t_load_end - t_load_start).count();
 
     std::cout << " done (" << std::fixed << std::setprecision(0) << load_ms << " ms)" << std::endl;
