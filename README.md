@@ -1,63 +1,99 @@
-# NanoInfer
+# 🔬 NanoInfer
 
-A lightweight LLM inference engine built from scratch in C++/CUDA, featuring vLLM-style PagedAttention and Continuous Batching.
+<p align="center">
+  <b>A lightweight LLM inference engine built from scratch in C++/CUDA</b><br>
+  <i>PagedAttention · Continuous Batching · Chunked Prefill · Prefix Caching · Configurable Sampling</i>
+</p>
 
-## Overview
+---
 
-NanoInfer is a minimal yet functional inference framework designed to explore and implement core techniques used in modern LLM serving systems. It supports end-to-end inference from model loading to text generation, with a focus on memory-efficient KV cache management and high-throughput batched decoding.
+## 📖 Overview
 
-## Features
+NanoInfer is a minimal yet functional inference framework designed to explore and implement core techniques used in modern LLM serving systems. It supports end-to-end inference from model loading to text generation, with a focus on memory-efficient KV cache management, high-throughput batched decoding, and flexible sampling strategies.
 
-### Model Support
+---
 
-- **LLaMA 2** architecture (FP32)
-<!-- - Configurable support for **LLaMA 3**, **Qwen2**, **Qwen3** (compile-time flags) -->
-- SentencePiece tokenizer integration
-- Custom binary model format with export tooling (`tools/export_llama2.py`)
+## ✨ Features
 
-### Inference Engine
+### 🤖 Model Support
 
-- **Continuous Batching** — dynamic request scheduling with concurrent prefill and decode
-- **PagedAttention** — vLLM-style block-based KV cache for memory-efficient serving
-  - Block Manager with dynamic allocation/deallocation
-  - Block Table mapping logical → physical blocks
-  - Per-layer paged Key/Value caches
-- **Chunked Prefill** — vLLM-style chunked prefill that processes prompt tokens in fixed-size chunks (default 512) rather than all at once
-  - Score matrix bounded to O(chunk_len × context_len) instead of O(seq_len²), preventing OOM on long prompts
-  - Gathers all cached K/V from Paged Cache per chunk for cuBLAS GEMM, combining memory efficiency with compute throughput
-  - Non-last chunks skip sampling; only the final chunk triggers first-token generation
-  - Transparent to upper-layer API — short prompts (< chunk_size) behave identically to single-pass prefill
-- **Scheduler** — FCFS policy with configurable max batch size, max concurrent sequences, and prefill chunk size
+| Model | Size | FP32 | W8A32 INT8 | Tokenizer | Chat Template |
+|-------|------|:----:|:----------:|-----------|:-------------:|
+| TinyLlama 1.1B | 1.1B | ✅ | ✅ | SentencePiece | ❌ |
+| LLaMA 3.2 1B | 1B | ✅ | ✅ | tiktoken (BPE) | ❌ |
+| LLaMA 3.2 1B Instruct | 1B | ✅ | ✅ | tiktoken (BPE) | ✅ |
 
-### CUDA Kernels
+> 📦 Unified export tooling: `tools/export_models.sh` — download from HuggingFace → convert to custom binary format
 
-| Operator | Description |
-|----------|-------------|
+### ⚡ Inference Engine
+
+| Feature | Description |
+|---------|-------------|
+| 🔄 **Continuous Batching** | Dynamic request scheduling with concurrent prefill and decode |
+| 📄 **PagedAttention** | vLLM-style block-based KV cache — Block Manager, Block Table (logical → physical), per-layer paged K/V |
+| 🧩 **Chunked Prefill** | Fixed-size chunks (default 512), O(chunk × ctx) instead of O(seq²), prevents OOM on long prompts |
+| 🗂️ **Prefix Caching** | Hash-based block deduplication — reuse KV cache across multi-turn conversations and shared-prefix workloads |
+| 📋 **Scheduler** | FCFS policy, configurable max batch size / max sequences / prefill chunk size |
+
+### 🎲 Configurable Sampler (vLLM-style)
+
+Per-request sampling parameters with a **fused CUDA kernel** pipeline:
+
+```
+RepetitionPenalty → Temperature → Top-K → Top-P (Nucleus) → Softmax → Multinomial
+```
+
+| Parameter | Description | Default |
+|-----------|-------------|:-------:|
+| `temperature` | Controls randomness (0 = greedy argmax) | `1.0` |
+| `top_k` | Keep top-K highest probability tokens (-1 = disabled) | `-1` |
+| `top_p` | Nucleus sampling threshold (1.0 = disabled) | `1.0` |
+| `repetition_penalty` | Penalize previously generated tokens (1.0 = disabled) | `1.0` |
+| `seed` | Random seed for reproducibility (-1 = random) | `-1` |
+
+### 🔧 CUDA & CPU Kernels
+
+> All operators have **both CUDA and CPU** implementations for dual-device support.
+
+| Kernel | Description |
+|--------|-------------|
 | Embedding | Token ID → embedding vector lookup |
 | RMSNorm | Root Mean Square Layer Normalization |
-| MatMul | cuBLAS-based matrix multiplication (supports batched inputs) |
-| RoPE | Rotary Positional Embedding (precomputed sin/cos cache) |
+| MatMul | cuBLAS-based matrix multiplication (batched) |
+| RoPE | Rotary Positional Embedding (LLaMA 3.2 scaling) |
 | SwiGLU | SwiGLU activation for FFN |
 | PagedAttention | Decode-phase attention with paged KV cache |
-| Chunked Prefill Attention | Gather K/V from paged cache → cuBLAS GEMM → chunked causal softmax |
+| Prefill Attention | Gather paged K/V → cuBLAS GEMM → chunked causal softmax |
 | Paged KV Write | Write K/V into block-based cache |
-| KV Cache Gather | Collect scattered paged K/V into contiguous buffer for GEMM |
-| Add | Residual connection (element-wise add) |
-| Argmax | Batched argmax sampling |
+| KV Cache Gather | Collect scattered K/V into contiguous buffer |
+| Add | Residual connection (element-wise) |
+| Sampling | Fused Rep-Penalty / Temp / Top-K / Top-P / Softmax / Multinomial |
+| Argmax | Batched greedy decoding fast path |
 
-### Architecture
+### 🏗️ Architecture
 
 ```
-Embedding → [RMSNorm → QKV → RoPE → PagedAttn → Wo → Add → RMSNorm → FFN(SwiGLU) → Add] × N → RMSNorm → Linear
+Embedding → [ RMSNorm → QKV → RoPE → PagedAttn → Wo → Add → RMSNorm → FFN(SwiGLU) → Add ] × N → RMSNorm → Linear → Sampler
 ```
 
-The engine architecture follows a three-layer design:
+```
+┌─────────────────────────────────────────────┐
+│                   Engine                     │
+│  ┌───────────┐  ┌───────┐  ┌─────────────┐ │
+│  │ Scheduler  │  │ Model │  │   Sampler   │ │
+│  │ (FCFS)     │  │(LLaMA)│  │(Configurable│ │
+│  └─────┬─────┘  └───┬───┘  └──────┬──────┘ │
+│        │            │              │         │
+│  ┌─────▼────────────▼──────────────▼──────┐ │
+│  │          KV Cache Manager              │ │
+│  │  (Block Manager + Prefix Caching)      │ │
+│  └────────────────────────────────────────┘ │
+└─────────────────────────────────────────────┘
+```
 
-- **Engine** — orchestrates scheduling, model execution, sampling, and KV cache lifecycle
-- **Scheduler** — manages request states (Waiting → Running → Finished) and batch composition
-- **KVCacheManager** — handles block allocation, sequence-to-block mapping, and physical memory pooling
+---
 
-## Project Structure
+## 📁 Project Structure
 
 ```
 NanoInfer/
@@ -66,20 +102,34 @@ NanoInfer/
 │   ├── engine/              # Engine, Scheduler, KVCacheManager, BlockTable
 │   ├── model/               # Model config, LLaMA implementation
 │   ├── op/                  # Operator layer interfaces
-│   ├── sampler/             # Sampling strategies
+│   ├── sampler/             # ConfigurableSampler, SamplingParams
 │   └── tensor/              # Tensor abstraction
 ├── src/                     # Implementation
 │   ├── op/kernels/cuda/     # CUDA kernel implementations
-│   └── op/kernels/cpu/      # CPU kernel fallbacks
+│   └── op/kernels/cpu/      # CPU kernel implementations
 ├── demo/                    # Inference demos
-│   ├── llama2.cpp           # Single-prompt inference
-│   └── batched_infer_multi_prompts.cpp  # Multi-prompt continuous batching
-├── test/                    # Unit tests (GTest)
-├── tools/                   # Model export & config utilities
+│   ├── chat_demo.cpp        # 💬 Interactive multi-turn chat (streaming)
+│   ├── sampling_strategies_demo.cpp  # 🎲 Sampling strategy comparison
+│   ├── batched_infer_multi_prompts.cpp  # 🔄 Multi-prompt continuous batching
+│   ├── prefix_caching_benchmark.cpp    # 🗂️ Prefix caching performance
+│   └── ...                  # Additional demos (CPU, single-prompt)
+├── test/                    # ✅ Unit tests (GTest)
+│   ├── test_cuda_kernel/    # Per-kernel correctness tests
+│   ├── test_engine/         # Engine, scheduler, sampling, prefix caching
+│   ├── test_op/             # Operator layer tests
+│   └── test_base/           # Allocator, tensor, buffer tests
+├── eval/                    # 📊 Accuracy verification (HuggingFace comparison)
+├── tools/                   # 🛠️ Model export & management scripts
+│   ├── export_models.sh     # Unified download + export
+│   ├── export_llama2.py     # LLaMA 2 weight converter
+│   └── export_llama3.py     # LLaMA 3 weight converter
+├── third_party/tiktoken/    # tiktoken BPE tokenizer (LLaMA 3)
 └── cmake/                   # CMake modules (CPM, CUDA config)
 ```
 
-## Build
+---
+
+## 🔨 Build
 
 ### Prerequisites
 
@@ -87,11 +137,17 @@ NanoInfer/
 - CUDA Toolkit (tested with CUDA 11.x / 12.x)
 - C++17 compiler (GCC / Clang)
 
-Dependencies are managed automatically via [CPM.cmake](https://github.com/cpm-cmake/CPM.cmake):
-- [glog](https://github.com/google/glog) — logging
-- [Google Test](https://github.com/google/googletest) — testing
-- [SentencePiece](https://github.com/google/sentencepiece) — tokenizer
-- [Armadillo](https://arma.sourceforge.net/) — CPU linear algebra
+Dependencies managed automatically via [CPM.cmake](https://github.com/cpm-cmake/CPM.cmake):
+
+| Dependency | Purpose |
+|------------|---------|
+| [glog](https://github.com/google/glog) | Logging |
+| [Google Test](https://github.com/google/googletest) | Testing |
+| [SentencePiece](https://github.com/google/sentencepiece) | LLaMA 2 tokenizer |
+| [Armadillo](https://arma.sourceforge.net/) | CPU linear algebra |
+| [nlohmann/json](https://github.com/nlohmann/json) | JSON parsing |
+| [re2](https://github.com/google/re2) | Regex (tiktoken) |
+| [abseil-cpp](https://github.com/abseil/abseil-cpp) | Utilities |
 
 ### Compile
 
@@ -101,32 +157,67 @@ cmake ..
 make -j$(nproc)
 ```
 
-## Usage
+---
 
-### 1. Export Model
+## 🚀 Usage
 
-```bash
-cd tools
-python export_llama2.py  # exports to custom binary format
-```
-
-### 2. Single-Prompt Inference
+### 1. 📦 Export Models
 
 ```bash
-./build/demo/llama2_infer
+# Download and export all supported models
+bash tools/export_models.sh all
+
+# Or export individually:
+bash tools/export_models.sh download-llama3-instruct
+bash tools/export_models.sh export-llama3-instruct-fp32
 ```
 
-### 3. Multi-Prompt Batched Inference
+### 2. 💬 Interactive Chat (LLaMA 3.2 1B Instruct)
 
 ```bash
-./build/demo/batched_infer_multi_prompts
+./build/demo/chat_demo --model llama3
 ```
 
-Demonstrates Continuous Batching with multiple prompts of varying lengths, showing parallel prefill and batched decode in action.
+Multi-turn conversation with streaming token output, prefix caching, and configurable sampling (`temp=0.7, top_k=40, top_p=0.9`).
 
-## Acknowledgements
+### 3. 🎲 Sampling Strategies Demo
 
-Special thanks to the following resources which greatly aided in the development of this project:
+```bash
+./build/demo/sampling_strategies_demo --model llama3
+```
+
+Side-by-side comparison of Greedy, Temperature, Top-K, Top-P, and combined sampling strategies.
+
+### 4. 🔄 Multi-Prompt Batched Inference
+
+```bash
+./build/demo/batched_infer_multi_prompts --model llama3
+```
+
+Continuous Batching with multiple prompts of varying lengths — parallel prefill + batched decode.
+
+### 5. ✅ Run Tests
+
+```bash
+cd build && ctest --output-on-failure
+```
+
+---
+
+## 📊 Accuracy Verification
+
+Compare NanoInfer outputs against HuggingFace transformers token-by-token:
+
+```bash
+pip install -r eval/requirements.txt
+python eval/hf_verify.py --model_dir ./models/tinyllama_hf
+```
+
+See [eval/README.md](eval/README.md) for details.
+
+---
+
+## 🙏 Acknowledgements
 
 - The initial inspiration and reference implementation provided by [KuiperLLama](https://github.com/zjhellofss/KuiperLLama).
-- Generative AI tools, specifically Gemini and Claude Code, were extensively used during the development process for code review, debugging, and optimization suggestions.
+- Generative AI tools (Gemini, Claude Code) were extensively used for code review, debugging, and optimization.
