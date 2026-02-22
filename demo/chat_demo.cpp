@@ -48,8 +48,8 @@ struct ModelPreset {
 static ModelPreset get_preset(const std::string& name, bool is_quant) {
     if (name == "llama3") {
         std::string bin =
-            is_quant ? "./models/llama3/llama3_int8.bin" : "./models/llama3/llama3_fp32.bin";
-        return {bin, "./models/llama3/tokenizer.json", base::ModelType::kModelTypeLLaMA3,
+            is_quant ? "./models/llama3_instruct/llama3_instruct_int8.bin" : "./models/llama3_instruct/llama3_instruct_fp32.bin";
+        return {bin, "./models/llama3_instruct/tokenizer.json", base::ModelType::kModelTypeLLaMA3,
                 base::TokenizerType::kEncodeBpe, is_quant};
     }
     std::string bin =
