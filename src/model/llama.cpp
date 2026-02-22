@@ -500,21 +500,27 @@ void LLamaModel::create_param_quant_layers() {
     }
 
     // 加载 Final Classification Layer (Cls)
-    auto cls_layer =
-        std::make_shared<op::MatmulLayer>(device_type_, config_->vocab_size_, dim, true);
-    cls_layer->set_group_size(group_size_);
     // 处理 Shared Weight (Embedding 与 Output 权重共享的情况)
     if (config_->is_shared_weight_) {
-        // // 复用 Embedding 权重 (位于 offset 0)
+        // Shared Weight: CLS 复用 Embedding 的 FP32 权重
+        // 导出时 cls 未单独写入文件，pos 当前直接指向 embedding 数据 (FP32)
+        // → CLS 层必须创建为非量化 (FP32 MatmulLayer)
+        auto cls_layer =
+            std::make_shared<op::MatmulLayer>(device_type_, config_->vocab_size_, dim, false);
         cls_layer->set_weight(0, {config_->vocab_size_, dim}, this->raw_model_data_->weight(pos),
                               cpu_device_type);
+        llama_layers_->cls_layer_ = cls_layer;
+        // pos 不前进 — 下方 embedding 加载会从同一位置读取
     } else {
-        // no shared
+        // Non-shared: CLS 有独立的量化权重
+        auto cls_layer =
+            std::make_shared<op::MatmulLayer>(device_type_, config_->vocab_size_, dim, true);
+        cls_layer->set_group_size(group_size_);
         cls_layer->set_weight(0, {config_->vocab_size_, dim}, this->raw_model_data_->weight(pos),
                               cpu_device_type);
+        llama_layers_->cls_layer_ = cls_layer;
         pos = pos + config_->vocab_size_ * dim + cls_layer->get_scale_num() * sizeof(float);
     }
-    llama_layers_->cls_layer_ = cls_layer;
 
     // 加载 Embedding Layer
     // Embedding 始终为 FP32 (float*)，即使在量化模型中通常也不量化 Embedding
