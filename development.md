@@ -170,7 +170,8 @@ schedule_next_batch():
 
 ### 4.1 当前现状
 
-仅实现 `ArgmaxSampler`（贪心采样），导致：
+已实现 `ConfigurableSampler`（支持 Greedy / Temperature / Top-K / Top-P / Repetition Penalty），替代了早期的纯 `ArgmaxSampler`。
+早期仅有 Greedy 采样时存在的问题：
 - 输出确定性（多次运行相同输入，输出完全一致）
 - 容易陷入退化重复循环（如 "The meaning of life is to be happy. 2. The meaning..." 的问题）
 - 无法控制生成多样性

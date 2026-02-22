@@ -12,13 +12,15 @@
 
 namespace engine {
 InferenceRequest::InferenceRequest(int64_t request_id, std::string prompt,
-                                   std::vector<int32_t> prompt_tokens, int32_t max_new_tokens)
+                                   std::vector<int32_t> prompt_tokens, int32_t max_new_tokens,
+                                   sampler::SamplingParams sampling_params)
     : request_id_(request_id),
       prompt_(std::move(prompt)),
       prompt_tokens_(std::move(prompt_tokens)),
       max_new_tokens_(max_new_tokens),
       state_(RequestState::kWaiting),
       num_computed_tokens_(0),
+      sampling_params_(std::move(sampling_params)),
       arrival_time_(std::chrono::high_resolution_clock::now()) {
 }
 

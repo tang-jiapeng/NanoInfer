@@ -225,6 +225,50 @@ using PrefillAttentionKernelFn =
 using ArgmaxKernelFn = void (*)(const tensor::Tensor& input, const tensor::Tensor& output,
                                 void* stream_or_config);
 
+// ============================================================================
+// 多样化采样 Kernel 协议 (Sampling Pipeline)
+// ============================================================================
+
+/**
+ * @brief Repetition Penalty Kernel 协议
+ * @details 对已生成 token 的 logits 施加重复惩罚（原地修改）
+ *   正 logit: logit /= penalty
+ *   负 logit: logit *= penalty
+ * @param logits         [batch_size, vocab_size] 输入/输出 logits
+ * @param penalty_tokens [batch_size, max_penalty_len] 需惩罚的 token IDs（-1 填充）
+ * @param penalties      [batch_size] 每个请求的 penalty 值
+ * @param stream_or_config CUDA 流指针 (cudaStream_t)
+ */
+using RepetitionPenaltyKernelFn = void (*)(const tensor::Tensor& logits,
+                                           const tensor::Tensor& penalty_tokens,
+                                           const tensor::Tensor& penalties, void* stream_or_config);
+
+/**
+ * @brief Temperature Scaling Kernel 协议
+ * @details 对 logits 做 Temperature 缩放（原地修改）：logits /= temperature
+ * @param logits       [batch_size, vocab_size] 输入/输出 logits
+ * @param temperatures [batch_size] 每个请求的 temperature 值
+ * @param stream_or_config CUDA 流指针 (cudaStream_t)
+ */
+using TemperatureKernelFn = void (*)(const tensor::Tensor& logits,
+                                     const tensor::Tensor& temperatures, void* stream_or_config);
+
+/**
+ * @brief Top-K / Top-P / Multinomial 采样 Kernel 协议
+ * @details 合并的过滤 + 采样算子：Top-K → Softmax → Top-P → Multinomial
+ * @param logits     [batch_size, vocab_size] 输入 logits（已做 temperature）
+ * @param output_ids [batch_size] 输出采样的 token ID
+ * @param top_ks     [batch_size] 每个请求的 Top-K 值（-1 表示不用）
+ * @param top_ps     [batch_size] 每个请求的 Top-P 值（1.0 表示不用）
+ * @param seeds      [batch_size] 每个请求的随机种子
+ * @param stream_or_config CUDA 流指针 (cudaStream_t)
+ */
+using TopKTopPSamplingKernelFn = void (*)(const tensor::Tensor& logits,
+                                          const tensor::Tensor& output_ids,
+                                          const tensor::Tensor& top_ks,
+                                          const tensor::Tensor& top_ps, const tensor::Tensor& seeds,
+                                          void* stream_or_config);
+
 }  // namespace kernel
 
 #endif  // NANO_INFER_KERNEL_TYPES_H

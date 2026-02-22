@@ -29,6 +29,7 @@
  */
 #include "nanoinfer/engine/engine.h"
 #include <cstring>
+#include "nanoinfer/sampler/configurable_sampler.h"
 
 namespace engine {
 
@@ -49,7 +50,7 @@ Engine::~Engine() {
  *   1. 创建 Scheduler（管理请求队列 + Prefill/Decode 调度）
  *   2. 创建 KVCacheManager 并分配物理显存（Paged KV Cache 块池）
  *   3. 将 KV Cache 的每层 Tensor 注入 Model（Model 持有引用）
- *   4. 创建 ArgmaxSampler
+ *   4. 创建 ConfigurableSampler
  *   5. 预分配 block_table / sampled_ids 的 Device Tensor（避免运行时反复分配）
  */
 base::Status Engine::init(std::shared_ptr<base::DeviceAllocator> allocator) {
@@ -89,9 +90,9 @@ base::Status Engine::init(std::shared_ptr<base::DeviceAllocator> allocator) {
     }
     model_->set_kv_cache(k_caches, v_caches);
 
-    // 初始化 Sampler
+    // 初始化 Sampler（ConfigurableSampler：支持 Greedy / Temperature / Top-K / Top-P）
     base::DeviceType device_type = allocator->device_type();
-    sampler_ = std::make_unique<sampler::ArgmaxSampler>(device_type);
+    sampler_ = std::make_unique<sampler::ConfigurableSampler>(device_type);
 
     int32_t max_blocks_per_seq = kv_cache_manager_->get_max_blocks_per_seq();
     block_table_device_ = tensor::Tensor(base::DataType::kDataTypeInt32, config_.max_batch_size,
@@ -115,7 +116,8 @@ base::Status Engine::init(std::shared_ptr<base::DeviceAllocator> allocator) {
  * 流程: 编码 prompt → 添加 BOS token → 为整个 prompt 预分配 KV Cache blocks → 加入 Scheduler
  * 返回 request_id（用于后续查询结果）
  */
-int64_t Engine::add_request(const std::string& prompt, int32_t max_new_tokens) {
+int64_t Engine::add_request(const std::string& prompt, int32_t max_new_tokens,
+                            const sampler::SamplingParams& sampling_params) {
     if (!initialized_) {
         LOG(ERROR) << "Engine not initialized. Call init() before adding requests.";
         return -1;
@@ -139,7 +141,7 @@ int64_t Engine::add_request(const std::string& prompt, int32_t max_new_tokens) {
 
     // 初始分配显存 (Prompt 长度)
     int32_t prompt_len = static_cast<int32_t>(tokens.size());
-    int64_t request_id = scheduler_->add_request(prompt, tokens, max_new_tokens);
+    int64_t request_id = scheduler_->add_request(prompt, tokens, max_new_tokens, sampling_params);
 
     if (config_.enable_prefix_caching) {
         // Prefix Caching: 尝试复用已缓存的 KV Block
@@ -328,7 +330,12 @@ base::Status Engine::execute_prefill_single(const InferenceRequestPtr& req,
         }
 
         tensor::Tensor sampled_id(base::DataType::kDataTypeInt32, 1, true, allocator_);
-        sampler_->sample_batched(last_logits, sampled_id);
+
+        // 使用 per-request 采样参数
+        const auto& sp = req->sampling_params();
+        std::vector<sampler::SamplingParams> params_vec = {sp};
+        std::vector<std::vector<int32_t>> gen_tokens_list = {req->generated_tokens()};
+        sampler_->sample_batched(last_logits, sampled_id, params_vec, gen_tokens_list);
 
         // D2H
         int32_t next_token;
@@ -420,9 +427,18 @@ base::Status Engine::execute_decode_batch(const std::vector<InferenceRequestPtr>
     status = model_->forward_batched(fwd_batch, logits);
     if (!status) return status;
 
-    // Batch Argmax 采样
+    // Batch 采样（使用 per-request 采样参数）
     tensor::Tensor sampled_ids_dev(base::DataType::kDataTypeInt32, batch_size, true, allocator_);
-    sampler_->sample_batched(logits, sampled_ids_dev);
+
+    std::vector<sampler::SamplingParams> batch_params;
+    std::vector<std::vector<int32_t>> batch_gen_tokens;
+    batch_params.reserve(batch_size);
+    batch_gen_tokens.reserve(batch_size);
+    for (const auto& req : reqs) {
+        batch_params.push_back(req->sampling_params());
+        batch_gen_tokens.push_back(req->generated_tokens());
+    }
+    sampler_->sample_batched(logits, sampled_ids_dev, batch_params, batch_gen_tokens);
 
     // D2H: 将采样结果拷回 Host
     std::vector<int32_t> next_tokens(batch_size);

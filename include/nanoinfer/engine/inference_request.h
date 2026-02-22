@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 #include "nanoinfer/base/base.h"
+#include "nanoinfer/sampler/sampling_params.h"
 
 namespace engine {
 
@@ -31,7 +32,8 @@ enum class RequestState {
 class InferenceRequest {
    public:
     InferenceRequest(int64_t request_id, std::string prompt, std::vector<int32_t> prompt_tokens,
-                     int32_t max_new_tokens);
+                     int32_t max_new_tokens,
+                     sampler::SamplingParams sampling_params = sampler::SamplingParams());
 
     ~InferenceRequest() = default;
 
@@ -131,6 +133,16 @@ class InferenceRequest {
     /// @brief 获取下一 Chunk 的 Position ID 列表（用于 RoPE）
     std::vector<int32_t> get_next_chunk_positions(int32_t chunk_size = 512) const;
 
+    /// @brief 获取采样参数
+    const sampler::SamplingParams& sampling_params() const {
+        return sampling_params_;
+    }
+
+    /// @brief 设置采样参数
+    void set_sampling_params(const sampler::SamplingParams& params) {
+        sampling_params_ = params;
+    }
+
     double latency_seconds() const;
 
     double execution_time_seconds() const;
@@ -149,6 +161,7 @@ class InferenceRequest {
     int32_t num_computed_tokens_;
 
     std::vector<int32_t> generated_tokens_;
+    sampler::SamplingParams sampling_params_;
 
     std::chrono::high_resolution_clock::time_point start_time_;
     std::chrono::high_resolution_clock::time_point finish_time_;

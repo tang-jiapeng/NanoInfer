@@ -102,7 +102,7 @@ def infer(model, tok, prompt: str, max_new_tokens: int) -> tuple[str, int, float
         out = model.generate(
             **inputs,
             max_new_tokens=max_new_tokens,
-            do_sample=False,  # greedy = argmax，与 C++ ArgmaxSampler 完全一致
+            do_sample=False,  # greedy = argmax，与 C++ ConfigurableSampler(greedy) 完全一致
             temperature=1.0,
             repetition_penalty=1.0,
         )

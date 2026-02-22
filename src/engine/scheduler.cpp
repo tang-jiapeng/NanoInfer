@@ -27,10 +27,11 @@ Scheduler::Scheduler(int32_t max_batch_size, int32_t max_sequences, int32_t chun
 
 /** @brief 将新推理请求加入等待队列，返回分配的 request_id */
 int64_t Scheduler::add_request(const std::string& prompt, const std::vector<int32_t>& prompt_tokens,
-                               int32_t max_new_tokens) {
+                               int32_t max_new_tokens,
+                               const sampler::SamplingParams& sampling_params) {
     int64_t request_id = next_seq_id_++;
-    auto request =
-        std::make_shared<InferenceRequest>(request_id, prompt, prompt_tokens, max_new_tokens);
+    auto request = std::make_shared<InferenceRequest>(request_id, prompt, prompt_tokens,
+                                                      max_new_tokens, sampling_params);
 
     // 加入等待队列
     waiting_queue_.push_back(request);

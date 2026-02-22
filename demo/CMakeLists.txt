@@ -25,3 +25,8 @@ add_executable(prefix_caching_benchmark prefix_caching_benchmark.cpp)
 target_link_directories(prefix_caching_benchmark PUBLIC ${PROJECT_SOURCE_DIR}/lib)
 target_link_libraries(prefix_caching_benchmark llama)
 set_target_properties(prefix_caching_benchmark PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+
+add_executable(sampling_strategies_demo sampling_strategies_demo.cpp)
+target_link_directories(sampling_strategies_demo PUBLIC ${PROJECT_SOURCE_DIR}/lib)
+target_link_libraries(sampling_strategies_demo llama)
+set_target_properties(sampling_strategies_demo PROPERTIES CUDA_SEPARABLE_COMPILATION ON)

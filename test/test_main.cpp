@@ -18,6 +18,7 @@
 //   ./test_llm --module=tensor,buffer  运行 Tensor + Buffer 测试
 //   ./test_llm --module=cuda_kernel    运行所有 CUDA Kernel 测试
 //   ./test_llm --module=engine         运行 Engine 测试
+//   ./test_llm --module=sampling       运行 Sampling 相关测试
 //   ./test_llm --module=model          运行 Model 加载测试
 //   ./test_llm --list-modules          列出所有可用模块名
 // ===========================================================================
@@ -38,6 +39,11 @@ static const std::unordered_map<std::string, std::string> kModuleFilterMap = {
      "EngineTest.*:BlockManagerTest.*:BlockTableTest.*"
      ":KVCacheManagerTest.*:SchedulerTest.*"
      ":BlockManagerCacheTest.*:KVCachePrefixTest.*"},
+    // Sampling 测试
+    {"sampling",
+     "SamplingParamsTest.*:RepetitionPenaltyTest.*"
+     ":TemperatureTest.*:TopKTopPTest.*"
+     ":ConfigurableSamplerTest.*"},
     // Layer 测试 (op/)
     {"layer",
      "LayerBaseTest.*:VecAddLayerTest.*:RmsNormLayerTest.*"
@@ -152,6 +158,9 @@ int main(int argc, char* argv[]) {
                 ":RoPEKernelTest.*:SwigluKernelTest.*"
                 ":EngineTest.*:BlockManagerTest.*:BlockTableTest.*"
                 ":KVCacheManagerTest.*:SchedulerTest.*"
+                ":SamplingParamsTest.*:RepetitionPenaltyTest.*"
+                ":TemperatureTest.*:TopKTopPTest.*"
+                ":ConfigurableSamplerTest.*"
                 ":LayerBaseTest.*:VecAddLayerTest.*:RmsNormLayerTest.*"
                 ":MatmulLayerTest.*:SwiGLULayerTest.*:EmbeddingLayerTest.*"
                 ":TinyLlamaTest.*";

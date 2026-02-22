@@ -8,6 +8,7 @@
 #include "nanoinfer/base/base.h"
 #include "nanoinfer/engine/engine.h"
 #include "nanoinfer/model/llama.h"
+#include "nanoinfer/sampler/sampling_params.h"
 
 // ----------------------------------------------------------------------------------
 // 配置参数

@@ -9,7 +9,6 @@
 #include "nanoinfer/base/base.h"
 #include "nanoinfer/op/embedding.h"
 #include "nanoinfer/op/encode.h"
-#include "nanoinfer/sampler/argmax_sampler.h"
 #include "nanoinfer/tensor/tensor.h"
 #include "raw_model_data.h"
 #include "sentencepiece_processor.h"

@@ -53,7 +53,8 @@ class Scheduler {
 
     /// @brief 提交新请求，返回 Request ID
     int64_t add_request(const std::string& prompt, const std::vector<int32_t>& prompt_tokens,
-                        int32_t max_new_tokens);
+                        int32_t max_new_tokens,
+                        const sampler::SamplingParams& sampling_params = sampler::SamplingParams());
 
     /// @brief 调度下一个 Batch
     ScheduledBatch schedule_next_batch();

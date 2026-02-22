@@ -13,7 +13,8 @@
 #include "nanoinfer/engine/kv_cache_manager.h"
 #include "nanoinfer/engine/scheduler.h"
 #include "nanoinfer/model/model.h"
-#include "nanoinfer/sampler/sampler.h"
+#include "nanoinfer/sampler/configurable_sampler.h"
+#include "nanoinfer/sampler/sampling_params.h"
 #include "nanoinfer/tensor/tensor.h"
 
 namespace engine {
@@ -49,9 +50,13 @@ class Engine {
 
     /**
      * @brief 提交推理请求
+     * @param prompt 原始文本
+     * @param max_new_tokens 最大生成 token 数
+     * @param sampling_params 采样参数（可选，默认 Greedy）
      * @return Request ID（失败返回 -1）
      */
-    int64_t add_request(const std::string& prompt, int32_t max_new_tokens);
+    int64_t add_request(const std::string& prompt, int32_t max_new_tokens,
+                        const sampler::SamplingParams& sampling_params = sampler::SamplingParams());
 
     /// @brief 执行单步推理：Schedule → Forward → Sample → Update
     base::Status step();
@@ -86,7 +91,7 @@ class Engine {
 
     std::unique_ptr<Scheduler> scheduler_;
     std::unique_ptr<KVCacheManager> kv_cache_manager_;
-    std::unique_ptr<sampler::Sampler> sampler_;
+    std::unique_ptr<sampler::ConfigurableSampler> sampler_;
 
     std::shared_ptr<base::DeviceAllocator> allocator_;
     base::DeviceType device_type_ = base::DeviceType::kDeviceUnknown;

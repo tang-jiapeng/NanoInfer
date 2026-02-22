@@ -7,7 +7,8 @@
 #include <string>
 #include <vector>
 #include "nanoinfer/base/base.h"
-#include "nanoinfer/sampler/argmax_sampler.h"
+#include "nanoinfer/sampler/configurable_sampler.h"
+#include "nanoinfer/sampler/sampling_params.h"
 
 // ----------------------------------------------------------------------------------
 // 配置参数
@@ -89,13 +90,23 @@ int main(int argc, char** argv) {
     google::InitGoogleLogging(argv[0]);
     FLAGS_logtostderr = true;
 
-    // 解析 --model llama2|llama3 和 --dtype fp32|int8 (默认 llama2 fp32)
+    // 解析命令行参数
     std::string model_name = "llama2";
     bool is_quant = false;
+    float temperature = 0.0f;  // 默认 Greedy
+    int32_t top_k = -1;
+    float top_p = 1.0f;
+    float rep_penalty = 1.0f;
+    int64_t seed = -1;
     for (int i = 1; i < argc - 1; ++i) {
         if (std::string(argv[i]) == "--model") model_name = argv[i + 1];
         if (std::string(argv[i]) == "--dtype" && std::string(argv[i + 1]) == "int8")
             is_quant = true;
+        if (std::string(argv[i]) == "--temperature") temperature = std::stof(argv[i + 1]);
+        if (std::string(argv[i]) == "--top-k") top_k = std::stoi(argv[i + 1]);
+        if (std::string(argv[i]) == "--top-p") top_p = std::stof(argv[i + 1]);
+        if (std::string(argv[i]) == "--rep-penalty") rep_penalty = std::stof(argv[i + 1]);
+        if (std::string(argv[i]) == "--seed") seed = std::stoll(argv[i + 1]);
     }
     auto preset = get_preset(model_name, is_quant);
     LOG(INFO) << "Model type: " << model_name << "  dtype: " << (is_quant ? "int8" : "fp32")
@@ -151,7 +162,19 @@ int main(int argc, char** argv) {
     // 4. 初始化推理资源
     // ===================================================================
     auto allocator = base::CUDADeviceAllocatorFactory::get_instance();
-    sampler::ArgmaxSampler sampler(base::DeviceType::kDeviceCUDA);
+    sampler::ConfigurableSampler sampler(base::DeviceType::kDeviceCUDA);
+
+    // 构建采样参数
+    sampler::SamplingParams sp;
+    sp.temperature = temperature;
+    sp.top_k = top_k;
+    sp.top_p = top_p;
+    sp.repetition_penalty = rep_penalty;
+    sp.seed = seed;
+
+    LOG(INFO) << "Sampling: temperature=" << sp.temperature << ", top_k=" << sp.top_k
+              << ", top_p=" << sp.top_p << ", rep_penalty=" << sp.repetition_penalty
+              << ", seed=" << sp.seed;
 
     // Block Table (Batch=1, 物理块连续分配)
     int32_t max_blocks = (MAX_SEQ_LEN + BLOCK_SIZE - 1) / BLOCK_SIZE;
@@ -208,7 +231,8 @@ int main(int argc, char** argv) {
                         vocab_size * sizeof(float), cudaMemcpyDeviceToDevice,
                         static_cast<cudaStream_t>(nullptr));
 
-        sampler.sample_batched(last_logits, next_token_tensor);
+        std::vector<sampler::SamplingParams> sp_vec = {sp};
+        sampler.sample_batched(last_logits, next_token_tensor, sp_vec, {});
     }
 
     int32_t next_token_id;
@@ -242,7 +266,10 @@ int main(int argc, char** argv) {
     for (int step = 0; step < MAX_NEW_TOKENS - 1; ++step) {
         forward_one_token(model.get(), total_output_ids.back(), current_pos, current_pos + 1,
                           block_table_tensor, logits, allocator);
-        sampler.sample_batched(logits, next_token_tensor);
+        std::vector<sampler::SamplingParams> sp_vec = {sp};
+        std::vector<std::vector<int32_t>> gen_toks = {std::vector<int32_t>(
+            total_output_ids.begin() + input_ids.size(), total_output_ids.end())};
+        sampler.sample_batched(logits, next_token_tensor, sp_vec, gen_toks);
 
         cudaMemcpy(&next_token_id, next_token_tensor.ptr<void>(), sizeof(int32_t),
                    cudaMemcpyDeviceToHost);
