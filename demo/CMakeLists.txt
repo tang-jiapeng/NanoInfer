@@ -20,3 +20,8 @@ add_executable(batched_infer_multi_prompts_cpu batched_infer_multi_prompts_cpu.c
 target_link_directories(batched_infer_multi_prompts_cpu PUBLIC ${PROJECT_SOURCE_DIR}/lib)
 target_link_libraries(batched_infer_multi_prompts_cpu llama)
 set_target_properties(batched_infer_multi_prompts_cpu PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+
+add_executable(prefix_caching_benchmark prefix_caching_benchmark.cpp)
+target_link_directories(prefix_caching_benchmark PUBLIC ${PROJECT_SOURCE_DIR}/lib)
+target_link_libraries(prefix_caching_benchmark llama)
+set_target_properties(prefix_caching_benchmark PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
