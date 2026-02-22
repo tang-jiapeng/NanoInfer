@@ -121,8 +121,8 @@ __global__ void matmul_quant_kernel(const float* __restrict__ input,
                                     int32_t N, int32_t K, int32_t group_size) {
     __shared__ float smem[QUANT_BLOCK];
 
-    int b = blockIdx.x;  // batch 索引
-    int n = blockIdx.y;  // 输出神经元索引
+    int n = blockIdx.x;  // 输出神经元索引（放 x 维度，上限 2^31-1，支持大 vocab）
+    int b = blockIdx.y;  // batch 索引（放 y 维度，上限 65535，batch 通常很小）
 
     const float* inp = input + b * K;      // 当前 batch 的输入行
     const int8_t* w_row = weight + n * K;  // 当前输出神经元对应的权重行
@@ -189,8 +189,8 @@ void matmul_kernel_cu_fp32int8(const tensor::Tensor& input, const tensor::Tensor
 
     cudaStream_t stream = static_cast<CudaConfig*>(config)->stream;
 
-    // Grid = (batch, N)：每个 Block 计算一个输出元素
-    dim3 grid(static_cast<uint32_t>(batch), static_cast<uint32_t>(N));
+    // Grid = (N, batch)：N 放 x 维度（上限 2^31-1，支持大 vocab），batch 放 y 维度
+    dim3 grid(static_cast<uint32_t>(N), static_cast<uint32_t>(batch));
     matmul_quant_kernel<<<grid, QUANT_BLOCK, 0, stream>>>(
         input.ptr<float>(), weight.ptr<int8_t>(), scale.ptr<float>(),
         const_cast<float*>(output.ptr<float>()), N, K, group_size);

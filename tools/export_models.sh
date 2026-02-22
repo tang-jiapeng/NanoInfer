@@ -84,10 +84,10 @@ do_export_llama2_int8() {
     check_python
     info "导出 TinyLlama W8A32 INT8 → ${LLAMA2_INT8_BIN}"
     mkdir -p "$(dirname "${LLAMA2_INT8_BIN}")"
+    # version 3 = legacy_export_quant (NanoInfer INT8 格式，W8A32 分组量化)
     python3 "${TOOLS_DIR}/export_llama2.py" "${LLAMA2_INT8_BIN}" \
         --hf "${LLAMA2_HF_DIR}" \
-        --version 2 \
-        --dtype int8
+        --version 3
     info "TinyLlama INT8 导出完成：${LLAMA2_INT8_BIN}"
 }
 
@@ -106,10 +106,10 @@ do_export_llama3_int8() {
     check_python
     info "导出 LLaMA3.2-1B W8A32 INT8 → ${LLAMA3_INT8_BIN}"
     mkdir -p "$(dirname "${LLAMA3_INT8_BIN}")"
+    # version 3 = legacy_export_quant (NanoInfer INT8 格式，W8A32 分组量化)
     python3 "${TOOLS_DIR}/export_llama3.py" "${LLAMA3_INT8_BIN}" \
         --hf "${LLAMA3_HF_DIR}" \
-        --version 2 \
-        --dtype int8
+        --version 3
     info "LLaMA3.2-1B INT8 导出完成：${LLAMA3_INT8_BIN}"
 }
 

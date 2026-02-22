@@ -24,16 +24,21 @@ struct ModelPreset {
     std::string token_path;
     base::ModelType model_type;
     base::TokenizerType tokenizer_type;
+    bool is_quant;  ///< true = W8A32 INT8 量化模型
 };
 
-static ModelPreset get_preset(const std::string& name) {
+static ModelPreset get_preset(const std::string& name, bool is_quant) {
     if (name == "llama3") {
-        return {"./models/llama3/llama3_fp32.bin", "./models/llama3/tokenizer.json",
-                base::ModelType::kModelTypeLLaMA3, base::TokenizerType::kEncodeBpe};
+        std::string bin =
+            is_quant ? "./models/llama3/llama3_int8.bin" : "./models/llama3/llama3_fp32.bin";
+        return {bin, "./models/llama3/tokenizer.json", base::ModelType::kModelTypeLLaMA3,
+                base::TokenizerType::kEncodeBpe, is_quant};
     }
     // 默认 llama2
-    return {"./models/llama2/llama2_fp32.bin", "./models/llama2/tokenizer.model",
-            base::ModelType::kModelTypeLLaMA2, base::TokenizerType::kEncodeSpe};
+    std::string bin =
+        is_quant ? "./models/llama2/llama2_int8.bin" : "./models/llama2/llama2_fp32.bin";
+    return {bin, "./models/llama2/tokenizer.model", base::ModelType::kModelTypeLLaMA2,
+            base::TokenizerType::kEncodeSpe, is_quant};
 }
 
 // ----------------------------------------------------------------------------------
@@ -84,22 +89,25 @@ int main(int argc, char** argv) {
     google::InitGoogleLogging(argv[0]);
     FLAGS_logtostderr = true;
 
-    // 解析 --model llama2|llama3 (默认 llama2)
+    // 解析 --model llama2|llama3 和 --dtype fp32|int8 (默认 llama2 fp32)
     std::string model_name = "llama2";
+    bool is_quant = false;
     for (int i = 1; i < argc - 1; ++i) {
-        if (std::string(argv[i]) == "--model") {
-            model_name = argv[i + 1];
-        }
+        if (std::string(argv[i]) == "--model") model_name = argv[i + 1];
+        if (std::string(argv[i]) == "--dtype" && std::string(argv[i + 1]) == "int8")
+            is_quant = true;
     }
-    auto preset = get_preset(model_name);
-    LOG(INFO) << "Model type: " << model_name << "  path: " << preset.model_path;
+    auto preset = get_preset(model_name, is_quant);
+    LOG(INFO) << "Model type: " << model_name << "  dtype: " << (is_quant ? "int8" : "fp32")
+              << "  path: " << preset.model_path;
 
     // ===================================================================
     // 1. 加载模型
     // ===================================================================
     LOG(INFO) << "Loading model...";
-    auto model = std::make_unique<model::LLamaModel>(preset.tokenizer_type, preset.model_type,
-                                                     preset.token_path, preset.model_path, false);
+    auto model =
+        std::make_unique<model::LLamaModel>(preset.tokenizer_type, preset.model_type,
+                                            preset.token_path, preset.model_path, preset.is_quant);
     model->init(base::DeviceType::kDeviceCUDA);
 
     // ===================================================================
