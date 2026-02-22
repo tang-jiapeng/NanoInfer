@@ -18,7 +18,8 @@ BlockManager::BlockManager(int32_t num_blocks, int32_t block_size, bool thread_s
     : num_blocks_(num_blocks),
       block_size_(block_size),
       thread_safe_(thread_safe),
-      allocated_(num_blocks, false) {
+      allocated_(num_blocks, false),
+      ref_counts_(num_blocks, 0) {
     // 初始化空闲块栈。
     // 使用逆序压栈 (N-1 -> 0)，这样 allocate 时 pop_back()取出的第一个块是 block_id 0
     free_blocks_.reserve(num_blocks);
@@ -149,7 +150,7 @@ bool BlockManager::is_allocated(int32_t block_id) const {
     return allocated_[block_id];
 }
 
-/** @brief 重置所有 Block 为空闲状态 */
+/** @brief 重置所有 Block 为空闲状态（含 Prefix Cache 清理） */
 void BlockManager::reset() {
     LockGuard lock(mutex_, thread_safe_);
 
@@ -158,10 +159,19 @@ void BlockManager::reset() {
 
     for (int32_t i = num_blocks_ - 1; i >= 0; --i) {
         allocated_[i] = false;
+        ref_counts_[i] = 0;
         free_blocks_.push_back(i);
     }
 
-    LOG(INFO) << "BlockManager reset: all " << num_blocks_ << " blocks freed";
+    // 清理 Prefix Cache 数据结构
+    hash_to_block_.clear();
+    block_to_hash_.clear();
+    eviction_order_.clear();
+    eviction_map_.clear();
+    cache_hits_ = 0;
+    cache_misses_ = 0;
+
+    LOG(INFO) << "BlockManager reset: all " << num_blocks_ << " blocks freed (cache cleared)";
 }
 
 float BlockManager::get_utilization() const {
@@ -169,6 +179,151 @@ float BlockManager::get_utilization() const {
     if (num_blocks_ == 0) return 0.0f;
     int32_t num_allocated = num_blocks_ - static_cast<int32_t>(free_blocks_.size());
     return static_cast<float>(num_allocated) / static_cast<float>(num_blocks_);
+}
+
+// ========== Prefix Caching 实现 ==========
+
+/**
+ * @brief 从空闲栈或 LRU 驱逐列表中分配一个 Block
+ *
+ * 优先使用空闲栈；若空闲栈为空，则驱逐 LRU 队列中最旧的缓存 Block。
+ */
+base::Status BlockManager::allocate_or_evict(int32_t& block_id) {
+    // 注意：调用者已持有锁
+    if (!free_blocks_.empty()) {
+        block_id = free_blocks_.back();
+        free_blocks_.pop_back();
+        allocated_[block_id] = true;
+        ref_counts_[block_id] = 0;
+        return base::error::Success();
+    }
+
+    if (!eviction_order_.empty()) {
+        // 驱逐最旧的缓存 Block（LRU: front = 最旧）
+        block_id = eviction_order_.front();
+        eviction_order_.pop_front();
+        eviction_map_.erase(block_id);
+
+        // 清除旧的 hash 映射
+        auto hash_it = block_to_hash_.find(block_id);
+        if (hash_it != block_to_hash_.end()) {
+            hash_to_block_.erase(hash_it->second);
+            block_to_hash_.erase(hash_it);
+        }
+
+        // Block 已是 allocated 状态，直接复用
+        ref_counts_[block_id] = 0;
+        VLOG(2) << "Evicted cached block " << block_id << " for reuse";
+        return base::error::Success();
+    }
+
+    return base::error::InternalError(
+        "No free or evictable blocks available (OOM). Total blocks: " +
+        std::to_string(num_blocks_));
+}
+
+/**
+ * @brief 尝试分配一个与 hash 匹配的缓存 Block（Prefix Caching 核心方法）
+ *
+ * 查找顺序：
+ *   1. hash_to_block_ 命中 → 复用现有 Block（incref）
+ *   2. 未命中 → 从 free_blocks_ 或 eviction_list 分配新 Block
+ */
+base::Status BlockManager::allocate_cached(uint64_t block_hash, int32_t& block_id,
+                                           bool& cache_hit) {
+    LockGuard lock(mutex_, thread_safe_);
+
+    // 查找 hash 是否已缓存
+    auto it = hash_to_block_.find(block_hash);
+    if (it != hash_to_block_.end()) {
+        block_id = it->second;
+
+        // 如果该 Block 在驱逐列表中 (ref_count=0)，从中移除并重新激活
+        if (ref_counts_[block_id] == 0) {
+            auto eit = eviction_map_.find(block_id);
+            if (eit != eviction_map_.end()) {
+                eviction_order_.erase(eit->second);
+                eviction_map_.erase(eit);
+            }
+        }
+        ref_counts_[block_id]++;
+        cache_hit = true;
+        cache_hits_++;
+
+        VLOG(2) << "Prefix cache HIT: hash=" << block_hash << " → block " << block_id
+                << " (ref_count=" << ref_counts_[block_id] << ")";
+        return base::error::Success();
+    }
+
+    // Cache miss: 分配新 Block
+    base::Status status = allocate_or_evict(block_id);
+    if (!status) {
+        return status;
+    }
+
+    // 注册 hash 映射
+    ref_counts_[block_id] = 1;
+    hash_to_block_[block_hash] = block_id;
+    block_to_hash_[block_id] = block_hash;
+    cache_hit = false;
+    cache_misses_++;
+
+    VLOG(2) << "Prefix cache MISS: hash=" << block_hash << " → new block " << block_id;
+    return base::error::Success();
+}
+
+/**
+ * @brief 释放 Block（引用计数模式）
+ *
+ * - ref_count > 0 的 Block：decref；若变为 0 且有 hash → 加入 LRU 驱逐列表
+ * - ref_count = 0 的 Block（非缓存 Block）：直接释放回空闲栈
+ */
+void BlockManager::release(int32_t block_id) {
+    LockGuard lock(mutex_, thread_safe_);
+
+    if (!is_valid_block_id(block_id) || !allocated_[block_id]) {
+        LOG(WARNING) << "Attempt to release invalid or unallocated block " << block_id;
+        return;
+    }
+
+    if (ref_counts_[block_id] > 0) {
+        ref_counts_[block_id]--;
+        if (ref_counts_[block_id] == 0) {
+            if (block_to_hash_.count(block_id)) {
+                // 有 hash → 保留 KV 数据，加入驱逐候选列表
+                eviction_order_.push_back(block_id);
+                eviction_map_[block_id] = std::prev(eviction_order_.end());
+                VLOG(2) << "Block " << block_id
+                        << " added to eviction list (ref_count=0, hash preserved)";
+            } else {
+                // 无 hash → 直接释放
+                allocated_[block_id] = false;
+                free_blocks_.push_back(block_id);
+                VLOG(2) << "Block " << block_id << " freed directly (no hash)";
+            }
+        }
+    } else {
+        // ref_count = 0: 这是通过普通 allocate() 分配的非缓存 Block
+        allocated_[block_id] = false;
+        free_blocks_.push_back(block_id);
+        VLOG(2) << "Block " << block_id << " freed (non-cached block)";
+    }
+}
+
+int32_t BlockManager::get_ref_count(int32_t block_id) const {
+    LockGuard lock(mutex_, thread_safe_);
+    if (!is_valid_block_id(block_id)) return 0;
+    return ref_counts_[block_id];
+}
+
+int32_t BlockManager::get_evictable_block_num() const {
+    LockGuard lock(mutex_, thread_safe_);
+    return static_cast<int32_t>(eviction_order_.size());
+}
+
+int32_t BlockManager::get_available_block_num() const {
+    LockGuard lock(mutex_, thread_safe_);
+    return static_cast<int32_t>(free_blocks_.size() + eviction_order_.size());
 }
 
 }  // namespace engine

@@ -182,7 +182,7 @@ base::Status KVCacheManager::extend_sequence(int32_t seq_id, int32_t additional_
     return base::error::Success();
 }
 
-/** @brief 释放序列的所有 KV Cache Block（BlockTable 移除 + BlockManager 归还） */
+/** @brief 释放序列的所有 KV Cache Block（支持 Prefix Caching 引用计数） */
 base::Status KVCacheManager::free_sequence(int32_t seq_id) {
     if (!block_table_->has_sequence(seq_id)) {
         return base::error::InvalidArgument("Sequence " + std::to_string(seq_id) +
@@ -194,13 +194,24 @@ base::Status KVCacheManager::free_sequence(int32_t seq_id) {
     if (!status) {
         return status;
     }
-    // 归还物理 Block
-    status = block_manager_->free(block_ids);
-    if (!status) {
-        LOG(ERROR) << "Failed to free blocks for sequence " << seq_id << ": "
-                   << status.get_err_msg();
-        return status;
+
+    if (cached_sequences_.count(seq_id)) {
+        // Prefix Caching 序列：使用 release (ref counting)
+        // 每个 block 根据自身状态决定是加入驱逐列表还是直接释放
+        for (int32_t block_id : block_ids) {
+            block_manager_->release(block_id);
+        }
+        cached_sequences_.erase(seq_id);
+    } else {
+        // 普通序列：直接释放
+        status = block_manager_->free(block_ids);
+        if (!status) {
+            LOG(ERROR) << "Failed to free blocks for sequence " << seq_id << ": "
+                       << status.get_err_msg();
+            return status;
+        }
     }
+
     // 移除元数据跟踪
     seq_num_tokens_.erase(seq_id);
 
@@ -266,6 +277,7 @@ void KVCacheManager::reset() {
     }
 
     seq_num_tokens_.clear();
+    cached_sequences_.clear();
     block_manager_->reset();
     block_table_->reset();
 
@@ -276,6 +288,136 @@ int32_t KVCacheManager::get_max_blocks_per_seq() const {
     // 假设最大序列长度，或者根据实际运行时的 max_seq_len 配置
     const int32_t max_seq_len = 4096;
     return (max_seq_len + block_size_ - 1) / block_size_;
+}
+
+// ========== Prefix Caching 实现 ==========
+
+/**
+ * @brief 计算 Token Block 的链式哈希
+ *
+ * 使用 boost::hash_combine 风格的混合函数，通过 prev_hash 实现前缀链接：
+ *   hash(block_n) = f(hash(block_{n-1}), tokens_n)
+ * 相同 token 序列但不同前缀会产生不同的 hash。
+ */
+uint64_t KVCacheManager::compute_block_hash(uint64_t prev_hash, const int32_t* tokens,
+                                            int32_t count) {
+    uint64_t hash = prev_hash;
+    for (int32_t i = 0; i < count; ++i) {
+        // boost::hash_combine 风格混合
+        hash ^= static_cast<uint64_t>(static_cast<uint32_t>(tokens[i])) + 0x9e3779b97f4a7c15ULL +
+                (hash << 12) + (hash >> 4);
+    }
+    return hash;
+}
+
+/**
+ * @brief 带 Prefix Caching 的序列分配
+ *
+ * 对 Prompt Tokens 按 block_size 分块计算链式哈希：
+ *   1. 完整块（Full Block）：通过 hash 尝试复用已缓存的 Block
+ *   2. 最后不完整块（Partial Block）：始终新分配（不可缓存）
+ *   3. 连续命中的前缀块 → num_cached_tokens = 连续命中数 × block_size
+ *
+ * 重要：只有从开头连续命中的块才可跳过 Prefill。
+ */
+base::Status KVCacheManager::allocate_sequence_cached(int32_t seq_id,
+                                                      const std::vector<int32_t>& tokens,
+                                                      int32_t& num_cached_tokens) {
+    if (!initialized_) {
+        return base::error::InvalidArgument("KVCacheManager is not initialized");
+    }
+    if (block_table_->has_sequence(seq_id)) {
+        return base::error::InvalidArgument("Sequence " + std::to_string(seq_id) +
+                                            " already allocated");
+    }
+
+    int32_t num_tokens = static_cast<int32_t>(tokens.size());
+    int32_t num_full_blocks = num_tokens / block_size_;
+    bool has_partial = (num_tokens % block_size_) > 0;
+    int32_t total_blocks_needed = num_full_blocks + (has_partial ? 1 : 0);
+
+    // 检查总可用块数（空闲 + 可驱逐）
+    if (block_manager_->get_available_block_num() < total_blocks_needed) {
+        return base::error::InternalError(
+            "Insufficient blocks for prefix-cached allocation. Need: " +
+            std::to_string(total_blocks_needed) +
+            ", Available: " + std::to_string(block_manager_->get_available_block_num()));
+    }
+
+    std::vector<int32_t> block_ids;
+    block_ids.reserve(total_blocks_needed);
+    num_cached_tokens = 0;
+    int32_t consecutive_cached_blocks = 0;
+    bool prefix_broken = false;
+
+    // 分配完整块（尝试缓存命中）
+    uint64_t prev_hash = 0;
+    for (int32_t i = 0; i < num_full_blocks; ++i) {
+        const int32_t* block_tokens = tokens.data() + i * block_size_;
+        uint64_t block_hash = compute_block_hash(prev_hash, block_tokens, block_size_);
+
+        int32_t block_id;
+        bool cache_hit;
+        base::Status status = block_manager_->allocate_cached(block_hash, block_id, cache_hit);
+        if (!status) {
+            // 回滚已分配的块
+            for (int32_t bid : block_ids) {
+                block_manager_->release(bid);
+            }
+            return status;
+        }
+        block_ids.push_back(block_id);
+
+        if (cache_hit && !prefix_broken) {
+            consecutive_cached_blocks++;
+        } else {
+            prefix_broken = true;
+        }
+
+        prev_hash = block_hash;
+    }
+
+    // 分配最后不完整块（普通分配，不缓存）
+    if (has_partial) {
+        int32_t block_id;
+        base::Status status = block_manager_->allocate(block_id);
+        if (!status) {
+            for (int32_t bid : block_ids) {
+                block_manager_->release(bid);
+            }
+            return status;
+        }
+        block_ids.push_back(block_id);
+    }
+
+    // 注册到 BlockTable
+    base::Status status = block_table_->allocate_sequence(seq_id, block_ids);
+    if (!status) {
+        for (int32_t bid : block_ids) {
+            block_manager_->release(bid);
+        }
+        return status;
+    }
+
+    // 只有从开头连续命中的块才可跳过 Prefill
+    num_cached_tokens = consecutive_cached_blocks * block_size_;
+
+    seq_num_tokens_[seq_id] = num_tokens;
+    cached_sequences_.insert(seq_id);
+
+    VLOG(1) << "Allocated cached sequence " << seq_id << ": " << num_tokens << " tokens, "
+            << total_blocks_needed << " blocks (" << consecutive_cached_blocks << " cached, "
+            << num_cached_tokens << " tokens skippable)";
+
+    return base::error::Success();
+}
+
+int64_t KVCacheManager::get_prefix_cache_hits() const {
+    return block_manager_->get_cache_hits();
+}
+
+int64_t KVCacheManager::get_prefix_cache_misses() const {
+    return block_manager_->get_cache_misses();
 }
 
 }  // namespace engine

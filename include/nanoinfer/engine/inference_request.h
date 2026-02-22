@@ -112,6 +112,11 @@ class InferenceRequest {
     /// @brief 累加已计算 Token 计数（Chunked Prefill 每完成一 Chunk 调用）
     void add_computed_tokens(int32_t count);
 
+    /// @brief 设置已计算 Token 数（用于 Prefix Caching 跳过已缓存前缀）
+    void set_num_computed_tokens(int32_t count) {
+        num_computed_tokens_ = count;
+    }
+
     /// @brief 返回下一个待处理 Token
     int32_t next_token() const;
 

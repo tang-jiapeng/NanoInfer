@@ -36,7 +36,8 @@ static const std::unordered_map<std::string, std::string> kModuleFilterMap = {
     // Engine 测试
     {"engine",
      "EngineTest.*:BlockManagerTest.*:BlockTableTest.*"
-     ":KVCacheManagerTest.*:SchedulerTest.*"},
+     ":KVCacheManagerTest.*:SchedulerTest.*"
+     ":BlockManagerCacheTest.*:KVCachePrefixTest.*"},
     // Layer 测试 (op/)
     {"layer",
      "LayerBaseTest.*:VecAddLayerTest.*:RmsNormLayerTest.*"

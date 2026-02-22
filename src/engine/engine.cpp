@@ -141,11 +141,33 @@ int64_t Engine::add_request(const std::string& prompt, int32_t max_new_tokens) {
     int32_t prompt_len = static_cast<int32_t>(tokens.size());
     int64_t request_id = scheduler_->add_request(prompt, tokens, max_new_tokens);
 
-    auto status =
-        kv_cache_manager_->allocate_sequence(static_cast<int32_t>(request_id), prompt_len);
-    if (!status) {
-        LOG(ERROR) << "Failed to allocate KV cache: " << status.get_err_msg();
-        return -1;
+    if (config_.enable_prefix_caching) {
+        // Prefix Caching: 尝试复用已缓存的 KV Block
+        int32_t num_cached_tokens = 0;
+        auto status = kv_cache_manager_->allocate_sequence_cached(static_cast<int32_t>(request_id),
+                                                                  tokens, num_cached_tokens);
+        if (!status) {
+            LOG(ERROR) << "Failed to allocate KV cache (prefix cached): " << status.get_err_msg();
+            return -1;
+        }
+
+        // 跳过已缓存的前缀 Token
+        if (num_cached_tokens > 0) {
+            auto req = scheduler_->get_request(request_id);
+            if (req) {
+                req->set_num_computed_tokens(num_cached_tokens);
+                LOG(INFO) << "Request " << request_id << ": prefix cache hit " << num_cached_tokens
+                          << "/" << prompt_len << " tokens";
+            }
+        }
+    } else {
+        // 普通分配路径
+        auto status =
+            kv_cache_manager_->allocate_sequence(static_cast<int32_t>(request_id), prompt_len);
+        if (!status) {
+            LOG(ERROR) << "Failed to allocate KV cache: " << status.get_err_msg();
+            return -1;
+        }
     }
 
     return request_id;

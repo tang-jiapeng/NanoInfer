@@ -20,11 +20,12 @@ namespace engine {
 
 /// @brief 引擎配置参数
 struct EngineConfig {
-    int32_t max_batch_size = 32;       ///< 最大并发 Batch Size
-    int32_t max_sequences = 128;       ///< 系统最大并发序列数
-    int32_t prefill_chunk_size = 512;  ///< Prefill 分块大小
-    int32_t block_size = 16;           ///< PagedAttention Block 大小
-    int32_t num_cache_blocks = 1024;   ///< 显存池 Block 总数
+    int32_t max_batch_size = 32;         ///< 最大并发 Batch Size
+    int32_t max_sequences = 128;         ///< 系统最大并发序列数
+    int32_t prefill_chunk_size = 512;    ///< Prefill 分块大小
+    int32_t block_size = 16;             ///< PagedAttention Block 大小
+    int32_t num_cache_blocks = 1024;     ///< 显存池 Block 总数
+    bool enable_prefix_caching = false;  ///< 启用 Prefix Caching
 };
 
 /**

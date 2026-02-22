@@ -7,6 +7,7 @@
 
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include "nanoinfer/engine/block_manager.h"
 #include "nanoinfer/engine/block_table.h"
@@ -64,6 +65,33 @@ class KVCacheManager {
 
     int32_t get_max_blocks_per_seq() const;
 
+    // ========== Prefix Caching ==========
+
+    /**
+     * @brief 带 Prefix Caching 的序列分配
+     *
+     * 对 Prompt Tokens 按 block_size 分块计算链式哈希，通过 hash_to_block 复用已缓存的 Block。
+     * 仅完整填满的 Block 可被缓存；最后一个不完整的 Block 始终新分配。
+     *
+     * @param seq_id 序列 ID
+     * @param tokens Prompt 的完整 token 序列
+     * @param[out] num_cached_tokens 可跳过的前缀 Token 数（已缓存）
+     */
+    base::Status allocate_sequence_cached(int32_t seq_id, const std::vector<int32_t>& tokens,
+                                          int32_t& num_cached_tokens);
+
+    /**
+     * @brief 计算 Token Block 的链式哈希
+     *
+     * 每个 Block 的 hash 依赖于前一个 Block 的 hash + 当前 Block 的 Token 内容，
+     * 保证相同 Token 在不同位置产生不同的 hash。
+     */
+    static uint64_t compute_block_hash(uint64_t prev_hash, const int32_t* tokens, int32_t count);
+
+    /// @brief Prefix Cache 命中率统计
+    int64_t get_prefix_cache_hits() const;
+    int64_t get_prefix_cache_misses() const;
+
     void reset();
 
     int32_t layer_num() const {
@@ -99,6 +127,7 @@ class KVCacheManager {
     std::vector<tensor::Tensor> value_caches_;
 
     std::unordered_map<int32_t, int32_t> seq_num_tokens_;
+    std::unordered_set<int32_t> cached_sequences_;  ///< 使用 Prefix Caching 的序列集合
 };
 }  // namespace engine
 
