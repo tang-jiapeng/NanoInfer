@@ -1,14 +1,18 @@
 /**
  * @file chat_demo.cpp
- * @brief 交互式多轮对话 Demo — 支持 LLaMA 3.2 1B Instruct
+ * @brief 交互式多轮对话 Demo — 支持 LLaMA 3.2 1B Instruct (流式输出)
  *
  * 使用 LLaMA 3 Chat Template 构造多轮对话上下文，每轮重建完整 prompt 提交给 Engine。
+ * 采用逐步 step() 驱动实现流式输出，每生成一个 token 即刻打印。
  * 启用 Prefix Caching 可复用前几轮的 KV Cache 前缀，降低重复 prefill 开销。
  *
  * 用法:
- *   ./chat_demo --model llama3                     (默认 fp32)
+ *   ./chat_demo --model llama3                     (默认 fp32, Instruct)
  *   ./chat_demo --model llama3 --dtype int8        (INT8 量化)
  *   ./chat_demo --model llama2                     (LLaMA2, 无 chat template)
+ *
+ * 注意: Chat 模式需要 Instruct 模型 (meta-llama/Llama-3.2-1B-Instruct), base 模型
+ *       未经 chat fine-tuning 无法正确遵循指令或生成 <|eot_id|> 停止符。
  */
 #include <glog/logging.h>
 #include <chrono>
@@ -47,8 +51,8 @@ struct ModelPreset {
 
 static ModelPreset get_preset(const std::string& name, bool is_quant) {
     if (name == "llama3") {
-        std::string bin =
-            is_quant ? "./models/llama3_instruct/llama3_instruct_int8.bin" : "./models/llama3_instruct/llama3_instruct_fp32.bin";
+        std::string bin = is_quant ? "./models/llama3_instruct/llama3_instruct_int8.bin"
+                                   : "./models/llama3_instruct/llama3_instruct_fp32.bin";
         return {bin, "./models/llama3_instruct/tokenizer.json", base::ModelType::kModelTypeLLaMA3,
                 base::TokenizerType::kEncodeBpe, is_quant};
     }
@@ -67,8 +71,9 @@ struct ChatMessage {
 };
 
 /**
- * @brief 构建 LLaMA 3 Chat Template (不含 <|begin_of_text|>，由 tokenizer 自动添加 BOS)
+ * @brief 构建 LLaMA 3 Instruct Chat Template
  *
+ * tokenizer 已自动添加 BOS (<|begin_of_text|>)，此处不重复添加。
  * 格式:
  *   <|start_header_id|>system<|end_header_id|>\n\n{system}<|eot_id|>
  *   <|start_header_id|>user<|end_header_id|>\n\n{user}<|eot_id|>
@@ -150,6 +155,9 @@ int main(int argc, char** argv) {
     print_separator();
     std::cout << "  Model: " << model_name << " (" << (is_quant ? "int8" : "fp32") << ")"
               << std::endl;
+    if (is_llama3) {
+        std::cout << "  Note: Requires Instruct model (Llama-3.2-1B-Instruct)" << std::endl;
+    }
 
     std::cout << "  Loading model..." << std::flush;
     FLAGS_minloglevel = 0;
@@ -193,7 +201,7 @@ int main(int argc, char** argv) {
     sp.seed = -1;  // 随机种子
 
     // ------------------------------------------------------------------
-    // 4. 对话循环
+    // 4. 对话循环 (流式输出)
     // ------------------------------------------------------------------
     std::vector<ChatMessage> history;
 
@@ -237,7 +245,7 @@ int main(int argc, char** argv) {
             is_llama3 ? build_llama3_prompt(history) : build_llama2_prompt(history);
 
         // 提交请求
-        auto t_start = std::chrono::high_resolution_clock::now();
+        auto t_submit = std::chrono::high_resolution_clock::now();
         int64_t rid = eng.add_request(prompt, MAX_NEW_TOKENS, sp);
         if (rid < 0) {
             std::cerr << "  [error: failed to add request]\n";
@@ -245,39 +253,79 @@ int main(int argc, char** argv) {
             continue;
         }
 
-        // 运行推理
+        // ----------------------------------------------------------
+        // 流式推理: 逐步 step() + 逐 token 输出
+        // ----------------------------------------------------------
         std::cout << "\nAssistant> " << std::flush;
-        status = eng.run();
+
+        int32_t prev_gen_len = 0;
+        double ttft_ms = 0.0;
+        bool got_first_token = false;
+        bool has_error = false;
+
+        while (eng.has_work()) {
+            status = eng.step();
+            if (!status) {
+                std::cerr << "\n  [error: " << status.get_err_msg() << "]";
+                has_error = true;
+                break;
+            }
+
+            // 检查是否有新 token 生成
+            auto req = eng.get_request(rid);
+            if (!req) break;
+
+            int32_t cur_gen_len = req->generated_len();
+            if (cur_gen_len > prev_gen_len) {
+                // 记录 TTFT (首 token 延迟 = prefill 完成时间)
+                if (!got_first_token) {
+                    auto t_first = std::chrono::high_resolution_clock::now();
+                    ttft_ms = std::chrono::duration<double, std::milli>(t_first - t_submit).count();
+                    got_first_token = true;
+                }
+
+                // 流式输出新生成的 token
+                const auto& tokens = req->generated_tokens();
+                for (int32_t i = prev_gen_len; i < cur_gen_len; ++i) {
+                    std::string piece = model->decode(tokens[i]);
+                    std::cout << piece << std::flush;
+                }
+                prev_gen_len = cur_gen_len;
+            }
+        }
+
         auto t_end = std::chrono::high_resolution_clock::now();
 
-        if (!status) {
-            std::cerr << "\n  [error: " << status.get_err_msg() << "]\n";
+        if (has_error) {
             history.pop_back();
+            std::cout << std::endl;
             continue;
         }
 
-        // 获取结果
+        // 获取完整回复文本 (用于历史记录)
         std::string reply = eng.get_request_result(rid);
         auto req = eng.get_request(rid);
-
-        // 打印回复
-        std::cout << reply << std::endl;
+        std::cout << std::endl;
 
         // 追加 assistant 回复到历史
         history.push_back({"assistant", reply});
         ++turn;
 
-        // 统计信息 (一行)
-        double total_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+        // 统计信息 (一行简洁版)
         int32_t prompt_len = req ? req->prompt_len() : 0;
         int32_t gen_len = req ? req->generated_len() : 0;
-        double tok_per_sec = (gen_len > 0 && total_ms > 0) ? (gen_len * 1000.0 / total_ms) : 0;
-        double exec_ms = req ? req->execution_time_seconds() * 1000.0 : 0;
+        double total_ms = std::chrono::duration<double, std::milli>(t_end - t_submit).count();
+        // decode 速度: 排除 prefill 阶段，仅计算 decode 阶段的 token 生成速率
+        double decode_ms = total_ms - ttft_ms;
+        // gen_len 包含首 token (prefill 阶段采样), decode 阶段生成 gen_len-1 个 token
+        double decode_tok_per_sec =
+            (gen_len > 1 && decode_ms > 0) ? ((gen_len - 1) * 1000.0 / decode_ms) : 0;
 
         std::cout << std::fixed << std::setprecision(1) << "  [turn " << turn
-                  << " | prompt=" << prompt_len << " gen=" << gen_len << " tokens"
-                  << " | " << exec_ms << "ms"
-                  << " | " << tok_per_sec << " tok/s]\n"
+                  << " | prompt=" << prompt_len << " gen=" << gen_len << " | TTFT=" << ttft_ms
+                  << "ms"
+                  << " | decode=" << decode_tok_per_sec << " tok/s"
+                  << " | total=" << total_ms << "ms]\n"
                   << std::endl;
     }
 
