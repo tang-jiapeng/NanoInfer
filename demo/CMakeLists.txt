@@ -30,3 +30,8 @@ add_executable(sampling_strategies_demo sampling_strategies_demo.cpp)
 target_link_directories(sampling_strategies_demo PUBLIC ${PROJECT_SOURCE_DIR}/lib)
 target_link_libraries(sampling_strategies_demo llama)
 set_target_properties(sampling_strategies_demo PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+
+add_executable(chat_demo chat_demo.cpp)
+target_link_directories(chat_demo PUBLIC ${PROJECT_SOURCE_DIR}/lib)
+target_link_libraries(chat_demo llama)
+set_target_properties(chat_demo PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
