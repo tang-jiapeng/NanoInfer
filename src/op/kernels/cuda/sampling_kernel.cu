@@ -114,6 +114,7 @@ __device__ __forceinline__ float warp_reduce_max(float val) {
 
 /**
  * @brief Block 级别求最大值（用于 numerically stable softmax）
+ * @note 返回值对 block 内所有线程一致
  */
 template <int BLOCK_SIZE>
 __device__ float block_reduce_max(float val) {
@@ -127,11 +128,16 @@ __device__ float block_reduce_max(float val) {
 
     val = (threadIdx.x < BLOCK_SIZE / warpSize) ? shared[lane] : -FLT_MAX;
     if (wid == 0) val = warp_reduce_max(val);
-    return val;
+
+    // 将 warp 0 lane 0 的结果广播给 block 内所有线程
+    if (threadIdx.x == 0) shared[0] = val;
+    __syncthreads();
+    return shared[0];
 }
 
 /**
  * @brief Block 级别求和（用于 softmax 分母）
+ * @note 返回值对 block 内所有线程一致
  */
 template <int BLOCK_SIZE>
 __device__ float block_reduce_sum(float val) {
@@ -145,7 +151,11 @@ __device__ float block_reduce_sum(float val) {
 
     val = (threadIdx.x < BLOCK_SIZE / warpSize) ? shared[lane] : 0.0f;
     if (wid == 0) val = warp_reduce_sum(val);
-    return val;
+
+    // 将 warp 0 lane 0 的结果广播给 block 内所有线程
+    if (threadIdx.x == 0) shared[0] = val;
+    __syncthreads();
+    return shared[0];
 }
 
 /**
@@ -188,7 +198,6 @@ __global__ void top_k_top_p_sampling_kernel(const float* __restrict__ logits,
         local_max = fmaxf(local_max, row[i]);
     }
     float global_max = block_reduce_max<BLOCK_SIZE>(local_max);
-    global_max = __shfl_sync(0xFFFFFFFF, global_max, 0);  // broadcast
 
     // === Step 2: Top-K 过滤（迭代阈值法）===
     // 通过二分搜索找到一个阈值 threshold，使得 row 中 >= threshold 的元素恰好有 K 个
@@ -212,7 +221,6 @@ __global__ void top_k_top_p_sampling_kernel(const float* __restrict__ logits,
             // Block 求和
             float count_f = static_cast<float>(local_count);
             float total_count_f = block_reduce_sum<BLOCK_SIZE>(count_f);
-            total_count_f = __shfl_sync(0xFFFFFFFF, total_count_f, 0);
             int total_count = static_cast<int>(total_count_f);
 
             if (total_count > top_k) {
@@ -236,7 +244,6 @@ __global__ void top_k_top_p_sampling_kernel(const float* __restrict__ logits,
         }
     }
     float global_exp_sum = block_reduce_sum<BLOCK_SIZE>(local_exp_sum);
-    global_exp_sum = __shfl_sync(0xFFFFFFFF, global_exp_sum, 0);
 
     float inv_sum = 1.0f / global_exp_sum;
 
@@ -261,7 +268,6 @@ __global__ void top_k_top_p_sampling_kernel(const float* __restrict__ logits,
                 }
             }
             float total_prob = block_reduce_sum<BLOCK_SIZE>(local_prob_sum);
-            total_prob = __shfl_sync(0xFFFFFFFF, total_prob, 0);
 
             if (total_prob > top_p) {
                 p_lo = p_mid;  // 阈值太低，升高
@@ -284,7 +290,6 @@ __global__ void top_k_top_p_sampling_kernel(const float* __restrict__ logits,
         }
     }
     float final_sum = block_reduce_sum<BLOCK_SIZE>(filtered_exp_sum);
-    final_sum = __shfl_sync(0xFFFFFFFF, final_sum, 0);
     float final_inv_sum = 1.0f / final_sum;
 
     // === Step 6: Multinomial 采样 ===
