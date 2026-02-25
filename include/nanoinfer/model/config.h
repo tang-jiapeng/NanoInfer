@@ -34,6 +34,8 @@ struct TransformerConfig {
     int32_t vocab_size_ = 0;
     int32_t dim_ = 0;
     int32_t hidden_dim_ = 0;
+    int32_t intermediate_size_ =
+        0;  ///< MLP 中间层维度（显式字段，与 hidden_dim_ 含义相同但命名更清晰）
     int32_t layer_num_ = 0;
     int32_t head_num_ = 0;
     int32_t kv_head_num_ = 0;

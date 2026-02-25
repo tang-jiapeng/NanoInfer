@@ -9,11 +9,13 @@
 #   download-llama2             从 HuggingFace 下载 TinyLlama 权重
 #   download-llama3             从 HuggingFace 下载 LLaMA3.2-1B 权重
 #   download-llama3-instruct    从 HuggingFace 下载 LLaMA3.2-1B-Instruct 权重 (新增)
+#   download-qwen3              从 HuggingFace 下载 Qwen3-0.6B 权重
 #   export-llama2-fp32          导出 TinyLlama FP32 格式
 #   export-llama2-int8          导出 TinyLlama W8A32 量化格式
 #   export-llama3-fp32          导出 LLaMA3.2-1B FP32 格式
 #   export-llama3-int8          导出 LLaMA3.2-1B W8A32 量化格式
 #   export-llama3-instruct-fp32 导出 LLaMA3.2-1B-Instruct FP32 格式 (新增)
+#   export-qwen3-fp32           导出 Qwen3-0.6B FP32 格式
 #   all                         依次执行 download + export（FP32 + INT8）所有步骤
 #   help                        显示此帮助信息
 #
@@ -91,7 +93,31 @@ do_download_qwen3() {
 }
 
 do_export_qwen3_fp32() {
-    // TODO: use export_qwen3/write_bin.py to export Qwen3-0.6B FP32 模型
+    check_python
+    info "导出 Qwen3-0.6B FP32 → ${QWEN3_FP32_BIN}"
+    mkdir -p "$(dirname "${QWEN3_FP32_BIN}")"
+
+    # Step 1: 从 HuggingFace 权重导出 PyTorch .pth 文件
+    local pth_file="${MODELS_DIR}/qwen3/qwen3_0.6b_weights.pth"
+    if [[ ! -f "${pth_file}" ]]; then
+        info "正在导出 HuggingFace 权重为 .pth 格式..."
+        pushd "${TOOLS_DIR}/export_qwen3" > /dev/null
+        python3 load.py --model_name "${QWEN3_HF_DIR}" --output_file "${pth_file}"
+        popd > /dev/null
+    else
+        info "已存在 .pth 文件，跳过导出: ${pth_file}"
+    fi
+
+    # Step 2: 将 .pth 转换为 NanoInfer 自定义 .bin 格式
+    pushd "${TOOLS_DIR}/export_qwen3" > /dev/null
+    python3 write_bin.py \
+        -n "${QWEN3_HF_DIR}" \
+        -p "${pth_file}" \
+        -d cpu \
+        -o "${QWEN3_FP32_BIN}"
+    popd > /dev/null
+
+    info "Qwen3-0.6B FP32 导出完成：${QWEN3_FP32_BIN}"
 }
 
 do_export_llama2_fp32() {
@@ -154,11 +180,13 @@ do_all() {
     do_download_llama2
     do_download_llama3
     do_download_llama3_instruct
+    do_download_qwen3
     do_export_llama2_fp32
     do_export_llama2_int8
     do_export_llama3_fp32
     do_export_llama3_int8
     do_export_llama3_instruct_fp32
+    do_export_qwen3_fp32
     info "所有步骤完成"
 }
 
@@ -175,11 +203,13 @@ case "${CMD}" in
     download-llama2)             do_download_llama2             ;;
     download-llama3)             do_download_llama3             ;;
     download-llama3-instruct)    do_download_llama3_instruct    ;;
+    download-qwen3)              do_download_qwen3              ;;
     export-llama2-fp32)          do_export_llama2_fp32          ;;
     export-llama2-int8)          do_export_llama2_int8          ;;
     export-llama3-fp32)          do_export_llama3_fp32          ;;
     export-llama3-int8)          do_export_llama3_int8          ;;
     export-llama3-instruct-fp32) do_export_llama3_instruct_fp32 ;;
+    export-qwen3-fp32)           do_export_qwen3_fp32           ;;
     all)                         do_all                         ;;
     help|--help|-h)              print_help                     ;;
     *)

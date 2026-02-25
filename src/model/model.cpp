@@ -134,6 +134,7 @@ base::Status Model::read_model_file() {
 base::Status Model::generate_model_infos(const ModelConfig& config) const {
     config_->dim_ = config.dim;
     config_->hidden_dim_ = config.hidden_dim;
+    config_->intermediate_size_ = config.hidden_dim;  // 显式记录 MLP 中间层维度
     config_->layer_num_ = config.layer_num;
     config_->head_num_ = config.head_num;
     config_->kv_head_num_ = config.kv_head_num;
@@ -158,6 +159,13 @@ base::Status Model::generate_model_infos(const ModelConfig& config) const {
             config_->rope_scaling_low_freq_factor_ = 1.0f;
             config_->rope_scaling_high_freq_factor_ = 4.0f;
             config_->rope_scaling_original_max_pos_ = 8192;
+            break;
+        case base::ModelType::kModelTypeQwen3:
+            config_->norm_eps_ = 1e-6f;
+            config_->rope_theta_ = 1000000.0f;
+            config_->bos_token_id_ = 151643;
+            config_->eos_token_id_ = 151645;
+            config_->has_rope_scaling_ = false;
             break;
         default:
             // 其它模型由 tokenizer 提供 bos/eos
