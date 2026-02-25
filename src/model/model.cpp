@@ -205,7 +205,13 @@ base::Status Model::create_encode_layer() {
         return error::InternalError("Create the encode layer failed.");
     }
 
-    config_->vocab_size_ = encode_layer_->vocab_size();
+    // vocab_size: 优先使用模型文件头中的值（权重矩阵维度），
+    // 仅在文件头未提供时才从 tokenizer 获取。
+    // 注意: Qwen3 的权重 vocab=151936，但 tokenizer 实际 token 数=151669，
+    // 模型前向计算必须使用与权重一致的 vocab_size。
+    if (config_->vocab_size_ <= 0) {
+        config_->vocab_size_ = encode_layer_->vocab_size();
+    }
     if (config_->vocab_size_ <= 0) {
         return error::InternalError("The vocab size param read error from the model file!");
     }
