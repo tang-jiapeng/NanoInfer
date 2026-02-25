@@ -168,6 +168,7 @@ base::Status Qwen3Model::read_model_file() {
     // 需要将 dim_ 修正为 hidden_size，并单独保存 attn_dim。
     attn_dim_ = config_->dim_;                // 保存: num_heads * head_dim (2048)
     config_->dim_ = qwen3_config.hidden_dim;  // 修正: dim_ = hidden_size (1024)
+    weight_vocab_size_ = config_->vocab_size_;  // 保存: 文件头原始 vocab_size (用于权重偏移)
     // intermediate_size_ 由 generate_model_infos 从 mapped_config.hidden_dim 设置（3072）
     // head_size_ / kv_dim_ / kv_mul_ 由 generate_model_infos 从 attn_dim 正确推导
 
@@ -523,7 +524,8 @@ void Qwen3Model::create_param_layers() {
     int32_t hidden_dim = config_->intermediate_size_;  // MLP intermediate_size
     int32_t head_dim = config_->head_size_;
     int32_t layer_num = config_->layer_num_;
-    int32_t vocab_size = config_->vocab_size_;
+    // 使用文件头原始 vocab_size 进行权重加载（tokenizer 可能覆盖 config_->vocab_size_）
+    int32_t vocab_size = weight_vocab_size_;
 
     // 文件指针位置 (以 float 元素为单位)
     size_t pos = 0;

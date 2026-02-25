@@ -88,6 +88,9 @@ class Qwen3Model : public Model {
 
     /// @brief Qwen3 特有: 总注意力维度 (num_heads * head_dim), 可能 != hidden_size
     int32_t attn_dim_ = 0;
+
+    /// @brief 文件头中的原始 vocab_size (用于权重偏移计算，不受 tokenizer 覆盖影响)
+    int32_t weight_vocab_size_ = 0;
 };
 
 }  // namespace model
