@@ -250,4 +250,5 @@ QwenEncodeLayer::QwenEncodeLayer(std::string token_model_path, bool has_bos, boo
     num_token_ = static_cast<int32_t>(encoder.size() + special_tokens.size());
     tiktoken_ = std::make_unique<tiktoken::tiktoken>(std::move(encoder), std::move(special_tokens),
                                                      PAT_STR);
+}
 }  // namespace op

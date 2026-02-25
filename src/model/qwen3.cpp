@@ -400,9 +400,23 @@ base::Status Qwen3Model::forward_batched(const ForwardBatch& input, tensor::Tens
         STATUS_CHECK(qwen3_layers_->wk_layers_[i]->forward(norm_out, k));
         STATUS_CHECK(qwen3_layers_->wv_layers_[i]->forward(norm_out, v));
 
-        // A2.5. Qwen3 QK Norm: 对 Q 和 K 做 RMSNorm (RoPE 之前)
+        // A2.5. Qwen3 QK Norm: 对 Q 和 K 做 per-head RMSNorm (RoPE 之前)
+        // QK Norm 权重为 [head_dim]，需要 reshape 为 [total_tokens * num_heads, head_dim] 后再 norm
+        int32_t head_dim = config_->head_size_;
+        int32_t num_heads = config_->head_num_;
+        int32_t num_kv_heads = config_->kv_head_num_;
+
+        q.reshape({total_tokens * num_heads, head_dim});
+        q_normed.reshape({total_tokens * num_heads, head_dim});
         STATUS_CHECK(qwen3_layers_->q_norm_layers_[i]->forward(q, q_normed));
+        q.reshape({total_tokens, q_dim});
+        q_normed.reshape({total_tokens, q_dim});
+
+        k.reshape({total_tokens * num_kv_heads, head_dim});
+        k_normed.reshape({total_tokens * num_kv_heads, head_dim});
         STATUS_CHECK(qwen3_layers_->k_norm_layers_[i]->forward(k, k_normed));
+        k.reshape({total_tokens, kv_dim});
+        k_normed.reshape({total_tokens, kv_dim});
 
         // A3. Attention（封装了 RoPE → KV Cache Write → Prefill/Decode Attention）
         auto& pa_layer = qwen3_layers_->attn_layer_;
