@@ -1,0 +1,1 @@
+#include "nanoinfer/model/qwen3.h"

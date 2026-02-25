@@ -32,18 +32,20 @@ MODELS_DIR="${SCRIPT_DIR}/../models"
 LLAMA2_HF_DIR="${MODELS_DIR}/llama2"
 LLAMA3_HF_DIR="${MODELS_DIR}/llama3"
 LLAMA3_INSTRUCT_HF_DIR="${MODELS_DIR}/llama3_instruct" # 新增 Instruct 目录
+QWEN3_HF_DIR="${MODELS_DIR}/qwen3" # 新增 Qwen3 目录
 
 LLAMA2_FP32_BIN="${MODELS_DIR}/llama2/llama2_fp32.bin"
 LLAMA2_INT8_BIN="${MODELS_DIR}/llama2/llama2_int8.bin"
 LLAMA3_FP32_BIN="${MODELS_DIR}/llama3/llama3_fp32.bin"
 LLAMA3_INT8_BIN="${MODELS_DIR}/llama3/llama3_int8.bin"
 LLAMA3_INSTRUCT_FP32_BIN="${MODELS_DIR}/llama3_instruct/llama3_instruct_fp32.bin" # 新增 Instruct bin
+QWEN3_FP32_BIN="${MODELS_DIR}/qwen3/qwen3_fp32.bin" # 新增 Qwen3 bin
 
 # HuggingFace 模型 ID
 LLAMA2_HF_ID="TinyLlama/TinyLlama_v1.1"
 LLAMA3_HF_ID="meta-llama/Llama-3.2-1B"
 LLAMA3_INSTRUCT_HF_ID="meta-llama/Llama-3.2-1B-Instruct" # 新增 Instruct ID
-
+QWEN3_HF_ID="Qwen/Qwen3-0.6B"
 # =============================================================================
 # 辅助函数
 # =============================================================================
@@ -79,6 +81,17 @@ do_download_llama3_instruct() {
     mkdir -p "${LLAMA3_INSTRUCT_HF_DIR}"
     hf download "${LLAMA3_INSTRUCT_HF_ID}" --local-dir "${LLAMA3_INSTRUCT_HF_DIR}"
     info "LLaMA3.2-1B-Instruct 下载完成"
+}
+
+do_download_qwen3() {
+    info "下载 Qwen3-0.6B 权重 → ${QWEN3_HF_DIR}"
+    mkdir -p "${QWEN3_HF_DIR}"
+    hf download "${QWEN3_HF_ID}" --local-dir "${QWEN3_HF_DIR}"
+    info "Qwen3-0.6B 下载完成"
+}
+
+do_export_qwen3_fp32() {
+    // TODO: use export_qwen3/write_bin.py to export Qwen3-0.6B FP32 模型
 }
 
 do_export_llama2_fp32() {

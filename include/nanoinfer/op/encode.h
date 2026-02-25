@@ -117,13 +117,18 @@ class BpeEncodeLayer : public EncodeLayerBase {
 
     int32_t eos_id() const override;
 
-   private:
+   protected:
     int32_t bos_id_ = -1;
     int32_t eos_id_ = -1;
     int32_t stop_token1_ = -1;  ///< <|end_of_text|>
     int32_t stop_token2_ = -1;  ///< <|eot_id|>
     int32_t num_token_ = 0;
     std::unique_ptr<tiktoken::tiktoken> tiktoken_;
+};
+
+class QwenEncodeLayer : public BpeEncodeLayer {
+   public:
+    explicit QwenEncodeLayer(std::string token_model_path, bool has_bos, bool has_eos);
 };
 
 }  // namespace op
