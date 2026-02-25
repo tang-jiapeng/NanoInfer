@@ -135,7 +135,7 @@ int main(int argc, char** argv) {
     LOG(INFO) << "Loading Qwen3 model from: " << MODEL_PATH << "  (" << (use_cuda ? "CUDA" : "CPU")
               << ")";
 
-    auto model = std::make_unique<model::Qwen3Model>(base::TokenizerType::kEncodeBpe,
+    auto model = std::make_unique<model::Qwen3Model>(base::TokenizerType::kEncodeQwen,
                                                      base::ModelType::kModelTypeQwen3, TOKEN_PATH,
                                                      MODEL_PATH, false);
 

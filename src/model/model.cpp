@@ -197,6 +197,8 @@ base::Status Model::create_encode_layer() {
         encode_layer_ = std::make_unique<op::SpeEncodeLayer>(this->token_path_, true, false);
     } else if (tokenizer_type_ == TokenizerType::kEncodeBpe) {
         encode_layer_ = std::make_unique<op::BpeEncodeLayer>(this->token_path_, true, false);
+    } else if (tokenizer_type_ == TokenizerType::kEncodeQwen) {
+        encode_layer_ = std::make_unique<op::QwenEncodeLayer>(this->token_path_, true, false);
     }
 
     if (!encode_layer_) {

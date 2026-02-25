@@ -198,8 +198,13 @@ int32_t BpeEncodeLayer::eos_id() const {
     return eos_id_;
 }
 
+/** @brief Protected skip-init 构造: 仅初始化基类，不加载词表 */
+BpeEncodeLayer::BpeEncodeLayer(SkipInit, std::string token_model_path, bool has_bos, bool has_eos)
+    : EncodeLayerBase(std::move(token_model_path), has_bos, has_eos) {
+}
+
 QwenEncodeLayer::QwenEncodeLayer(std::string token_model_path, bool has_bos, bool has_eos)
-    : BpeEncodeLayer(std::move(token_model_path), has_bos, has_eos) {
+    : BpeEncodeLayer(SkipInit{}, token_model_path, has_bos, has_eos) {
     using json = nlohmann::json;
     std::ifstream f(token_model_path_);
     CHECK(f.is_open())
@@ -239,8 +244,8 @@ QwenEncodeLayer::QwenEncodeLayer(std::string token_model_path, bool has_bos, boo
     stop_token1_ = eos_id_;
     stop_token2_ = find_special("<|endoftext|>");
 
-    CHECK(bos_id_ != -1) << "BOS token <|begin_of_text|> not found in tokenizer JSON";
-    CHECK(eos_id_ != -1) << "EOS token <|end_of_text|> not found in tokenizer JSON";
+    CHECK(bos_id_ != -1) << "BOS token <|im_start|> not found in tokenizer JSON";
+    CHECK(eos_id_ != -1) << "EOS token <|im_end|> not found in tokenizer JSON";
 
     num_token_ = static_cast<int32_t>(encoder.size() + special_tokens.size());
     tiktoken_ = std::make_unique<tiktoken::tiktoken>(std::move(encoder), std::move(special_tokens),

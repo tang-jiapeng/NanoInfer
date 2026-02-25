@@ -54,7 +54,7 @@ static ModelPreset get_preset(const std::string& name, bool is_quant) {
     if (name == "qwen3") {
         // Qwen3-0.6B (BPE tokenizer, FP32 only for now)
         return {"./models/qwen3/qwen3_fp32.bin", "./models/qwen3/tokenizer.json",
-                base::ModelType::kModelTypeQwen3, base::TokenizerType::kEncodeBpe, false};
+                base::ModelType::kModelTypeQwen3, base::TokenizerType::kEncodeQwen, false};
     }
     if (name == "llama3") {
         std::string bin = is_quant ? "./models/llama3_instruct/llama3_instruct_int8.bin"

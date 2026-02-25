@@ -103,6 +103,12 @@ class BpeEncodeLayer : public EncodeLayerBase {
    public:
     explicit BpeEncodeLayer(std::string token_model_path, bool has_bos, bool has_eos);
 
+   protected:
+    /// @brief Protected 构造: 仅初始化基类成员，不加载词表（供子类 QwenEncodeLayer 使用）
+    struct SkipInit {};
+    BpeEncodeLayer(SkipInit, std::string token_model_path, bool has_bos, bool has_eos);
+
+   public:
     std::vector<int32_t> encode(const std::string& sentence) const override;
 
     std::string decode(int32_t token_id) const override;
@@ -129,6 +135,9 @@ class BpeEncodeLayer : public EncodeLayerBase {
 class QwenEncodeLayer : public BpeEncodeLayer {
    public:
     explicit QwenEncodeLayer(std::string token_model_path, bool has_bos, bool has_eos);
+
+   private:
+    using BpeEncodeLayer::SkipInit;
 };
 
 }  // namespace op
