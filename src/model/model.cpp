@@ -134,6 +134,7 @@ base::Status Model::read_model_file() {
 base::Status Model::generate_model_infos(const ModelConfig& config) const {
     config_->dim_ = config.dim;
     config_->hidden_dim_ = config.hidden_dim;
+    config_->intermediate_size_ = config.hidden_dim;  // 显式记录 MLP 中间层维度
     config_->layer_num_ = config.layer_num;
     config_->head_num_ = config.head_num;
     config_->kv_head_num_ = config.kv_head_num;
@@ -159,6 +160,13 @@ base::Status Model::generate_model_infos(const ModelConfig& config) const {
             config_->rope_scaling_high_freq_factor_ = 4.0f;
             config_->rope_scaling_original_max_pos_ = 8192;
             break;
+        case base::ModelType::kModelTypeQwen3:
+            config_->norm_eps_ = 1e-6f;
+            config_->rope_theta_ = 1000000.0f;
+            config_->bos_token_id_ = 151643;
+            config_->eos_token_id_ = 151645;
+            config_->has_rope_scaling_ = false;
+            break;
         default:
             // 其它模型由 tokenizer 提供 bos/eos
             config_->bos_token_id_ = -1;
@@ -176,6 +184,12 @@ base::Status Model::generate_model_infos(const ModelConfig& config) const {
         config_->is_shared_weight_ = false;
     }
 
+    // Qwen3: lm_head 独立存储（非共享），write_bin.py 同时写入 embed_tokens 和 lm_head，
+    // 但 vocab_size 为正数，不能靠符号判断，必须强制覆盖。
+    if (model_type_ == base::ModelType::kModelTypeQwen3) {
+        config_->is_shared_weight_ = false;
+    }
+
     config_->vocab_size_ = std::abs(config.vocab_size);
     return base::error::Success();
 }
@@ -189,13 +203,21 @@ base::Status Model::create_encode_layer() {
         encode_layer_ = std::make_unique<op::SpeEncodeLayer>(this->token_path_, true, false);
     } else if (tokenizer_type_ == TokenizerType::kEncodeBpe) {
         encode_layer_ = std::make_unique<op::BpeEncodeLayer>(this->token_path_, true, false);
+    } else if (tokenizer_type_ == TokenizerType::kEncodeQwen) {
+        encode_layer_ = std::make_unique<op::QwenEncodeLayer>(this->token_path_, true, false);
     }
 
     if (!encode_layer_) {
         return error::InternalError("Create the encode layer failed.");
     }
 
-    config_->vocab_size_ = encode_layer_->vocab_size();
+    // vocab_size: 优先使用模型文件头中的值（权重矩阵维度），
+    // 仅在文件头未提供时才从 tokenizer 获取。
+    // 注意: Qwen3 的权重 vocab=151936，但 tokenizer 实际 token 数=151669，
+    // 模型前向计算必须使用与权重一致的 vocab_size。
+    if (config_->vocab_size_ <= 0) {
+        config_->vocab_size_ = encode_layer_->vocab_size();
+    }
     if (config_->vocab_size_ <= 0) {
         return error::InternalError("The vocab size param read error from the model file!");
     }

@@ -32,8 +32,9 @@ struct TransformerConfig {
     int32_t head_size_ = 0;
 
     int32_t vocab_size_ = 0;
-    int32_t dim_ = 0;
-    int32_t hidden_dim_ = 0;
+    int32_t dim_ = 0;            ///< hidden_size (模型嵌入维度 / 残差流宽度)
+    int32_t hidden_dim_ = 0;     ///< intermediate_size (MLP 中间层维度, 沿用 llama2.c 命名)
+    int32_t intermediate_size_ = 0;  ///< 同 hidden_dim_, 显式命名便于阅读
     int32_t layer_num_ = 0;
     int32_t head_num_ = 0;
     int32_t kv_head_num_ = 0;

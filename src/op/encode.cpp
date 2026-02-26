@@ -198,4 +198,57 @@ int32_t BpeEncodeLayer::eos_id() const {
     return eos_id_;
 }
 
+/** @brief Protected skip-init 构造: 仅初始化基类，不加载词表 */
+BpeEncodeLayer::BpeEncodeLayer(SkipInit, std::string token_model_path, bool has_bos, bool has_eos)
+    : EncodeLayerBase(std::move(token_model_path), has_bos, has_eos) {
+}
+
+QwenEncodeLayer::QwenEncodeLayer(std::string token_model_path, bool has_bos, bool has_eos)
+    : BpeEncodeLayer(SkipInit{}, token_model_path, has_bos, has_eos) {
+    using json = nlohmann::json;
+    std::ifstream f(token_model_path_);
+    CHECK(f.is_open())
+        << "The token model path is not valid, please check the path and type of token model.";
+    json data;
+    try {
+        data = json::parse(f);
+    } catch (json::parse_error&) {
+        LOG(FATAL)
+            << "The token model path is not valid, please check the path and type of token model.";
+    }
+
+    // 加载特殊 token（BOS、EOS、模板符 etc.）
+    ankerl::unordered_dense::map<std::string, int> special_tokens;
+    for (const auto& item : data["added_tokens"]) {
+        special_tokens.insert({item["content"].get<std::string>(), item["id"].get<int>()});
+    }
+
+    // 加载常规 BPE 词表：将 GPT-2 字节表示（如 Ġ 代表空格）还原为原始字节
+    ankerl::unordered_dense::map<std::string, int> encoder;
+    for (const auto& v : data["model"]["vocab"].items()) {
+        const auto cpts = unicode_cpts_from_utf8(v.key());
+        std::string key;
+        for (const auto cpt : cpts) {
+            key += unicode_utf8_to_byte(unicode_cpt_to_utf8(cpt));
+        }
+        encoder[key] = v.value().get<int32_t>();
+    }
+
+    // 读取 BOS/EOS 和所有停止 token
+    auto find_special = [&](const std::string& key) -> int32_t {
+        auto it = special_tokens.find(key);
+        return (it != special_tokens.end()) ? static_cast<int32_t>(it->second) : -1;
+    };
+    bos_id_ = find_special("<|im_start|>");
+    eos_id_ = find_special("<|im_end|>");
+    stop_token1_ = eos_id_;
+    stop_token2_ = find_special("<|endoftext|>");
+
+    CHECK(bos_id_ != -1) << "BOS token <|im_start|> not found in tokenizer JSON";
+    CHECK(eos_id_ != -1) << "EOS token <|im_end|> not found in tokenizer JSON";
+
+    num_token_ = static_cast<int32_t>(encoder.size() + special_tokens.size());
+    tiktoken_ = std::make_unique<tiktoken::tiktoken>(std::move(encoder), std::move(special_tokens),
+                                                     PAT_STR);
+}
 }  // namespace op

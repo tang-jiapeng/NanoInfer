@@ -1,0 +1,431 @@
+/**
+ * @file qwen3_batched_infer.cpp
+ * @brief Qwen3 离线批量推理 Demo — 多 Prompt 并发 (Continuous Batching + CUDA)
+ *
+ * 演示 NanoInfer 框架对 Qwen3-0.6B 模型的离线批量推理能力：
+ *   - 多条 Prompt 同时提交，通过 Continuous Batching 并行处理
+ *   - Prefill + Decode 自动调度，展示 Scheduler 工作状态
+ *   - 细粒度性能分析：Per-Request TTFT / Prefill / Decode 吞吐量
+ *
+ * 用法:
+ *   ./qwen3_batched_infer                              (默认 CUDA, fp32)
+ *   ./qwen3_batched_infer --device cpu                 (CPU 模式)
+ *   ./qwen3_batched_infer --max-tokens 128             (自定义最大生成长度)
+ *
+ * 模型路径约定:
+ *   ./models/qwen3/qwen3_fp32.bin      权重文件
+ *   ./models/qwen3/tokenizer.json      BPE Tokenizer
+ */
+#include <glog/logging.h>
+#include <chrono>
+#include <iomanip>
+#include <iostream>
+#include <memory>
+#include <string>
+#include <unordered_map>
+#include <vector>
+#include "nanoinfer/base/base.h"
+#include "nanoinfer/engine/engine.h"
+#include "nanoinfer/model/qwen3.h"
+#include "nanoinfer/sampler/sampling_params.h"
+
+// ----------------------------------------------------------------------------------
+// 配置参数
+// ----------------------------------------------------------------------------------
+
+// 模型路径
+const std::string MODEL_PATH = "./models/qwen3/qwen3_fp32.bin";
+const std::string TOKEN_PATH = "./models/qwen3/tokenizer.json";
+
+// Engine 参数
+const int32_t MAX_BATCH_SIZE = 8;        // 最大并发 Batch (decode 阶段的序列数)
+const int32_t MAX_SEQUENCES = 16;        // 系统最大并发序列数
+const int32_t PREFILL_CHUNK_SIZE = 512;  // Prefill 每步处理的最大 token 数
+const int32_t BLOCK_SIZE = 16;           // PagedAttention Block 大小
+const int32_t NUM_CACHE_BLOCKS = 1024;   // 显存池 Block 总数
+
+// 默认生成参数
+const int32_t DEFAULT_MAX_NEW_TOKENS = 64;
+
+// ----------------------------------------------------------------------------------
+// Per-Request 性能追踪
+// ----------------------------------------------------------------------------------
+struct RequestPerfTracker {
+    int32_t prompt_len = 0;
+    int32_t generated_len = 0;
+
+    double prefill_time_ms = 0.0;
+    int32_t prefill_steps = 0;
+
+    double decode_time_ms = 0.0;
+    int32_t decode_steps = 0;
+
+    double ttft_ms = 0.0;
+
+    bool was_prefill = true;
+    std::chrono::high_resolution_clock::time_point phase_start;
+
+    void start_phase() {
+        phase_start = std::chrono::high_resolution_clock::now();
+    }
+
+    void end_prefill_step() {
+        auto now = std::chrono::high_resolution_clock::now();
+        prefill_time_ms += std::chrono::duration<double, std::milli>(now - phase_start).count();
+        prefill_steps++;
+    }
+
+    void end_decode_step() {
+        auto now = std::chrono::high_resolution_clock::now();
+        decode_time_ms += std::chrono::duration<double, std::milli>(now - phase_start).count();
+        decode_steps++;
+    }
+};
+
+// ----------------------------------------------------------------------------------
+// 可视化辅助
+// ----------------------------------------------------------------------------------
+static void print_separator(int width = 70) {
+    std::cout << std::string(width, '=') << std::endl;
+}
+
+static void print_step_info(int step, const engine::Scheduler::Stats& stats) {
+    std::cout << "  [Step " << std::setw(4) << step << "] " << "Running: " << stats.num_running
+              << "  |  " << "Waiting: " << stats.num_waiting << "  |  "
+              << "Finished: " << stats.num_finished << "\r" << std::flush;
+}
+
+// ----------------------------------------------------------------------------------
+// 命令行参数解析
+// ----------------------------------------------------------------------------------
+struct CmdArgs {
+    std::string device_str = "cuda";
+    int32_t max_new_tokens = DEFAULT_MAX_NEW_TOKENS;
+};
+
+static CmdArgs parse_args(int argc, char** argv) {
+    CmdArgs args;
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--device" && i + 1 < argc) {
+            args.device_str = argv[++i];
+        } else if (arg == "--max-tokens" && i + 1 < argc) {
+            args.max_new_tokens = std::stoi(argv[++i]);
+        }
+    }
+    return args;
+}
+
+// ----------------------------------------------------------------------------------
+// Main
+// ----------------------------------------------------------------------------------
+int main(int argc, char** argv) {
+    google::InitGoogleLogging(argv[0]);
+    FLAGS_logtostderr = true;
+    FLAGS_v = 0;
+
+    auto cmd_args = parse_args(argc, argv);
+    bool use_cuda = (cmd_args.device_str == "cuda" || cmd_args.device_str == "gpu");
+    auto device_type = use_cuda ? base::DeviceType::kDeviceCUDA : base::DeviceType::kDeviceCPU;
+
+    // ==================================================================
+    // 1. 加载 Qwen3 模型
+    // ==================================================================
+    auto t_load_start = std::chrono::high_resolution_clock::now();
+    LOG(INFO) << "Loading Qwen3 model from: " << MODEL_PATH << "  (" << (use_cuda ? "CUDA" : "CPU")
+              << ")";
+
+    auto model = std::make_unique<model::Qwen3Model>(base::TokenizerType::kEncodeQwen,
+                                                     base::ModelType::kModelTypeQwen3, TOKEN_PATH,
+                                                     MODEL_PATH, false);
+
+    model->init(device_type);
+
+    auto t_load_end = std::chrono::high_resolution_clock::now();
+    double load_time_ms =
+        std::chrono::duration<double, std::milli>(t_load_end - t_load_start).count();
+
+    LOG(INFO) << "Model loaded. Vocab=" << model->config().vocab_size_
+              << ", Layers=" << model->config().layer_num_ << ", Dim=" << model->config().dim_
+              << ", HeadSize=" << model->config().head_size_
+              << ", Heads=" << model->config().head_num_
+              << ", KVHeads=" << model->config().kv_head_num_;
+
+    // ==================================================================
+    // 2. 准备多条 Prompt (不同领域、不同长度，展示 Continuous Batching)
+    // ==================================================================
+    struct PromptEntry {
+        std::string text;
+        int32_t max_tokens;
+    };
+
+    int32_t max_tok = cmd_args.max_new_tokens;
+
+    std::vector<PromptEntry> prompts = {
+        {"<|im_start|>user\nWhat is the capital of France?<|im_end|>\n<|im_start|>assistant\n",
+         max_tok},
+        {"<|im_start|>user\nExplain quantum computing in simple "
+         "terms.<|im_end|>\n<|im_start|>assistant\n",
+         max_tok},
+        {"<|im_start|>user\nWrite a short poem about the ocean.<|im_end|>\n<|im_start|>assistant\n",
+         max_tok},
+        {"<|im_start|>system\nYou are a helpful coding assistant.<|im_end|>\n"
+         "<|im_start|>user\nWrite a Python function to compute fibonacci numbers.<|im_end|>\n"
+         "<|im_start|>assistant\n",
+         max_tok},
+    };
+
+    // ==================================================================
+    // 3. 创建并初始化 Engine
+    // ==================================================================
+    engine::EngineConfig engine_config;
+    engine_config.max_batch_size = MAX_BATCH_SIZE;
+    engine_config.max_sequences = MAX_SEQUENCES;
+    engine_config.prefill_chunk_size = PREFILL_CHUNK_SIZE;
+    engine_config.block_size = BLOCK_SIZE;
+    engine_config.num_cache_blocks = NUM_CACHE_BLOCKS;
+
+    engine::Engine eng(model.get(), engine_config);
+    std::shared_ptr<base::DeviceAllocator> allocator;
+    if (use_cuda) {
+        allocator = base::CUDADeviceAllocatorFactory::get_instance();
+    } else {
+        allocator = base::CPUDeviceAllocatorFactory::get_instance();
+    }
+
+    auto status = eng.init(allocator);
+    CHECK(status) << "Engine init failed: " << status.get_err_msg();
+
+    LOG(INFO) << "Engine initialized. Max Batch=" << MAX_BATCH_SIZE
+              << ", Blocks=" << NUM_CACHE_BLOCKS << ", Chunk=" << PREFILL_CHUNK_SIZE;
+
+    // ==================================================================
+    // 4. 提交所有请求
+    // ==================================================================
+    std::vector<int64_t> request_ids;
+    request_ids.reserve(prompts.size());
+
+    std::unordered_map<int64_t, RequestPerfTracker> perf_trackers;
+
+    // 采样参数 (适合多样化文本生成)
+    sampler::SamplingParams sp;
+    sp.temperature = 0.7f;
+    sp.top_k = 50;
+    sp.top_p = 0.9f;
+    sp.repetition_penalty = 1.1f;
+    sp.seed = 42;  // 固定种子保证可复现
+
+    std::cout << "\n";
+    print_separator();
+    std::cout << "  Qwen3 Batched Inference Demo (Continuous Batching)" << std::endl;
+    print_separator();
+    std::cout << "  Device: " << (use_cuda ? "CUDA" : "CPU") << std::endl;
+    std::cout << "  Sampling: temp=" << sp.temperature << ", top_k=" << sp.top_k
+              << ", top_p=" << sp.top_p << ", rep_penalty=" << sp.repetition_penalty << std::endl;
+    std::cout << "\n--- Submitting " << prompts.size() << " Prompts ---\n" << std::endl;
+
+    for (size_t i = 0; i < prompts.size(); ++i) {
+        int64_t rid = eng.add_request(prompts[i].text, prompts[i].max_tokens, sp);
+        CHECK(rid >= 0) << "Failed to add request " << i;
+        request_ids.push_back(rid);
+
+        auto req = eng.get_request(rid);
+        std::cout << "  [Request " << rid << "] prompt_len=" << req->prompt_len()
+                  << "  max_gen=" << prompts[i].max_tokens << std::endl;
+
+        // 截断显示 prompt 文本
+        std::string display = prompts[i].text;
+        // 移除 ChatML 控制符便于展示
+        auto strip_pos = display.find("<|im_start|>assistant");
+        if (strip_pos != std::string::npos) {
+            display = display.substr(0, strip_pos);
+        }
+        if (display.size() > 80) display = display.substr(0, 77) + "...";
+        std::cout << "    \"" << display << "\"" << std::endl;
+
+        RequestPerfTracker tracker;
+        tracker.prompt_len = req->prompt_len();
+        tracker.was_prefill = true;
+        perf_trackers[rid] = tracker;
+    }
+
+    // ==================================================================
+    // 5. 逐步执行并展示调度过程
+    // ==================================================================
+    std::cout << "\n--- Running Inference (step-by-step) ---\n" << std::endl;
+
+    auto t_start = std::chrono::high_resolution_clock::now();
+    int step_count = 0;
+
+    while (eng.has_work()) {
+        // 记录每个活跃请求当前的阶段
+        std::unordered_map<int64_t, bool> pre_step_is_prefill;
+        for (auto& rid : request_ids) {
+            auto req = eng.get_request(rid);
+            if (req && !req->is_finished()) {
+                pre_step_is_prefill[rid] = req->is_prefill();
+                perf_trackers[rid].start_phase();
+            }
+        }
+
+        status = eng.step();
+        CHECK(status) << "Step " << step_count << " failed: " << status.get_err_msg();
+
+        step_count++;
+
+        // 更新每个请求的阶段计时
+        for (auto& [rid, was_prefill] : pre_step_is_prefill) {
+            auto& tracker = perf_trackers[rid];
+            if (was_prefill) {
+                tracker.end_prefill_step();
+                auto req = eng.get_request(rid);
+                if (req && !req->is_prefill() && tracker.was_prefill) {
+                    tracker.ttft_ms = tracker.prefill_time_ms;
+                    tracker.was_prefill = false;
+                }
+            } else {
+                tracker.end_decode_step();
+            }
+        }
+
+        if (step_count % 10 == 0 || !eng.has_work()) {
+            auto stats = eng.get_scheduler_stats();
+            print_step_info(step_count, stats);
+        }
+    }
+
+    auto t_end = std::chrono::high_resolution_clock::now();
+    double elapsed_s = std::chrono::duration<double>(t_end - t_start).count();
+    double elapsed_ms = elapsed_s * 1000.0;
+
+    std::cout << std::endl;
+    std::cout << "\nInference complete in " << step_count << " steps.\n" << std::endl;
+
+    // ==================================================================
+    // 6. 打印生成结果
+    // ==================================================================
+    print_separator();
+    std::cout << "  Generation Results" << std::endl;
+    print_separator();
+
+    int total_prompt_tokens = 0;
+    int total_generated_tokens = 0;
+
+    for (size_t i = 0; i < request_ids.size(); ++i) {
+        int64_t rid = request_ids[i];
+        auto req = eng.get_request(rid);
+        std::string generated_text = eng.get_request_result(rid);
+
+        int32_t gen_len = req->generated_len();
+        int32_t prompt_len = req->prompt_len();
+
+        total_prompt_tokens += prompt_len;
+        total_generated_tokens += gen_len;
+
+        perf_trackers[rid].generated_len = gen_len;
+
+        std::cout << "\n[Request " << rid << "]  " << "(prompt=" << prompt_len
+                  << ", generated=" << gen_len << ")" << std::endl;
+
+        // 简短显示 prompt
+        std::string prompt_display = prompts[i].text;
+        if (prompt_display.size() > 100) prompt_display = prompt_display.substr(0, 97) + "...";
+        std::cout << "  Prompt:    " << prompt_display << std::endl;
+        std::cout << "  Generated: " << generated_text << std::endl;
+    }
+
+    // ==================================================================
+    // 7. 细粒度性能报告
+    // ==================================================================
+    std::cout << std::endl;
+    print_separator();
+    std::cout << "  Detailed Performance Report (" << (use_cuda ? "CUDA" : "CPU") << ")"
+              << std::endl;
+    print_separator();
+    std::cout << std::fixed << std::setprecision(2);
+
+    // --- 模型加载 ---
+    std::cout << "\n  [Model Loading]" << std::endl;
+    std::cout << "    Load Time:            " << load_time_ms << " ms" << std::endl;
+
+    // --- Per-Request 详情 ---
+    double total_prefill_ms = 0, total_decode_ms = 0;
+
+    for (size_t i = 0; i < request_ids.size(); ++i) {
+        int64_t rid = request_ids[i];
+        auto& t = perf_trackers[rid];
+
+        std::cout << "\n  [Request " << rid << "]" << std::endl;
+
+        // Prefill 指标
+        double prefill_throughput =
+            (t.prefill_time_ms > 0) ? (t.prompt_len * 1000.0 / t.prefill_time_ms) : 0;
+        std::cout << "    Prefill:" << std::endl;
+        std::cout << "      Tokens:             " << t.prompt_len << std::endl;
+        std::cout << "      Time:               " << t.prefill_time_ms << " ms" << std::endl;
+        std::cout << "      Throughput:          " << prefill_throughput << " tok/s" << std::endl;
+        std::cout << "      Steps (chunks):      " << t.prefill_steps << std::endl;
+
+        // TTFT
+        std::cout << "    TTFT:                 " << t.ttft_ms << " ms" << std::endl;
+
+        // Decode 指标
+        double decode_throughput =
+            (t.decode_time_ms > 0) ? (t.generated_len * 1000.0 / t.decode_time_ms) : 0;
+        double avg_token_latency = (t.generated_len > 0) ? (t.decode_time_ms / t.generated_len) : 0;
+        std::cout << "    Decode:" << std::endl;
+        std::cout << "      Tokens:             " << t.generated_len << std::endl;
+        std::cout << "      Time:               " << t.decode_time_ms << " ms" << std::endl;
+        std::cout << "      Throughput:          " << decode_throughput << " tok/s" << std::endl;
+        std::cout << "      Avg Token Latency:   " << avg_token_latency << " ms/tok" << std::endl;
+
+        // E2E
+        double e2e_ms = t.prefill_time_ms + t.decode_time_ms;
+        std::cout << "    E2E Time:             " << e2e_ms << " ms" << std::endl;
+
+        total_prefill_ms += t.prefill_time_ms;
+        total_decode_ms += t.decode_time_ms;
+    }
+
+    // --- 聚合统计 ---
+    std::cout << "\n  [Aggregate]" << std::endl;
+    std::cout << "    Total Prompts:          " << prompts.size() << std::endl;
+    std::cout << "    Total Prompt Tokens:    " << total_prompt_tokens << std::endl;
+    std::cout << "    Total Generated Tokens: " << total_generated_tokens << std::endl;
+    std::cout << "    Total Steps:            " << step_count << std::endl;
+    std::cout << "    Wall Clock Time:        " << elapsed_ms << " ms  (" << elapsed_s << " s)"
+              << std::endl;
+
+    if (elapsed_s > 0) {
+        double gen_throughput = total_generated_tokens / elapsed_s;
+        double total_throughput = (total_prompt_tokens + total_generated_tokens) / elapsed_s;
+        std::cout << "    Decode Throughput:      " << gen_throughput << " tok/s  ("
+                  << "batched decode, " << request_ids.size() << " seqs)" << std::endl;
+        std::cout << "    Total Throughput:       " << total_throughput << " tok/s" << std::endl;
+    }
+
+    // Prefill vs Decode 时间占比
+    double total_compute_ms = total_prefill_ms + total_decode_ms;
+    if (total_compute_ms > 0) {
+        std::cout << "    Prefill Time (sum):     " << total_prefill_ms << " ms  ("
+                  << (total_prefill_ms / total_compute_ms * 100.0) << "%)" << std::endl;
+        std::cout << "    Decode Time (sum):      " << total_decode_ms << " ms  ("
+                  << (total_decode_ms / total_compute_ms * 100.0) << "%)" << std::endl;
+    }
+
+    // Avg decode token latency
+    if (total_generated_tokens > 0) {
+        double avg_decode_lat = total_decode_ms / total_generated_tokens;
+        std::cout << "    Avg Decode Latency:     " << avg_decode_lat
+                  << " ms/tok  (per-request sum)" << std::endl;
+    }
+
+    auto final_stats = eng.get_scheduler_stats();
+    std::cout << "    Scheduler - Finished:   " << final_stats.num_finished << std::endl;
+    std::cout << "    Scheduler - Running:    " << final_stats.num_running << std::endl;
+    std::cout << "    Scheduler - Waiting:    " << final_stats.num_waiting << std::endl;
+    print_separator();
+    std::cout << std::endl;
+
+    return 0;
+}

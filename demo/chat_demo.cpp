@@ -1,29 +1,30 @@
 /**
  * @file chat_demo.cpp
- * @brief 交互式多轮对话 Demo — 支持 LLaMA 3.2 1B Instruct (流式输出)
+ * @brief 交互式多轮对话 Demo — 支持 Qwen3 / LLaMA 3 / LLaMA 2 (流式输出)
  *
- * 使用 LLaMA 3 Chat Template 构造多轮对话上下文，每轮重建完整 prompt 提交给 Engine。
+ * 使用 Chat Template 构造多轮对话上下文，每轮重建完整 prompt 提交给 Engine。
  * 采用逐步 step() 驱动实现流式输出，每生成一个 token 即刻打印。
  * 启用 Prefix Caching 可复用前几轮的 KV Cache 前缀，降低重复 prefill 开销。
  *
  * 用法:
- *   ./chat_demo --model llama3                     (默认 fp32, Instruct)
+ *   ./chat_demo                                    (默认 qwen3, fp32)
+ *   ./chat_demo --model qwen3                      (Qwen3-0.6B)
+ *   ./chat_demo --model llama3                     (LLaMA3 Instruct)
  *   ./chat_demo --model llama3 --dtype int8        (INT8 量化)
  *   ./chat_demo --model llama2                     (LLaMA2, 无 chat template)
- *
- * 注意: Chat 模式需要 Instruct 模型 (meta-llama/Llama-3.2-1B-Instruct), base 模型
- *       未经 chat fine-tuning 无法正确遵循指令或生成 <|eot_id|> 停止符。
  */
 #include <glog/logging.h>
 #include <chrono>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
 #include "nanoinfer/base/base.h"
 #include "nanoinfer/engine/engine.h"
 #include "nanoinfer/model/llama.h"
+#include "nanoinfer/model/qwen3.h"
 #include "nanoinfer/sampler/sampling_params.h"
 
 // ----------------------------------------------------------------------------------
@@ -50,16 +51,34 @@ struct ModelPreset {
 };
 
 static ModelPreset get_preset(const std::string& name, bool is_quant) {
+    if (name == "qwen3") {
+        // Qwen3-0.6B (BPE tokenizer, FP32 only for now)
+        return {"./models/qwen3/qwen3_fp32.bin", "./models/qwen3/tokenizer.json",
+                base::ModelType::kModelTypeQwen3, base::TokenizerType::kEncodeQwen, false};
+    }
     if (name == "llama3") {
         std::string bin = is_quant ? "./models/llama3_instruct/llama3_instruct_int8.bin"
                                    : "./models/llama3_instruct/llama3_instruct_fp32.bin";
         return {bin, "./models/llama3_instruct/tokenizer.json", base::ModelType::kModelTypeLLaMA3,
                 base::TokenizerType::kEncodeBpe, is_quant};
     }
+    // 默认 llama2
     std::string bin =
         is_quant ? "./models/llama2/llama2_int8.bin" : "./models/llama2/llama2_fp32.bin";
     return {bin, "./models/llama2/tokenizer.model", base::ModelType::kModelTypeLLaMA2,
             base::TokenizerType::kEncodeSpe, is_quant};
+}
+
+/// @brief 根据 ModelPreset 创建对应的 Model 实例
+static std::unique_ptr<model::Model> create_model(const ModelPreset& preset) {
+    if (preset.model_type == base::ModelType::kModelTypeQwen3) {
+        return std::make_unique<model::Qwen3Model>(preset.tokenizer_type, preset.model_type,
+                                                   preset.token_path, preset.model_path,
+                                                   preset.is_quant);
+    }
+    return std::make_unique<model::LLamaModel>(preset.tokenizer_type, preset.model_type,
+                                               preset.token_path, preset.model_path,
+                                               preset.is_quant);
 }
 
 // ----------------------------------------------------------------------------------
@@ -110,6 +129,41 @@ static std::string build_llama2_prompt(const std::vector<ChatMessage>& messages)
     return oss.str();
 }
 
+/**
+ * @brief 构建 Qwen3 Chat Template
+ *
+ * 格式 (ChatML variant):
+ *   <|im_start|>system\n{system}<|im_end|>\n
+ *   <|im_start|>user\n{user}<|im_end|>\n
+ *   <|im_start|>assistant\n{assistant}<|im_end|>\n
+ *   ...
+ *   <|im_start|>assistant\n
+ */
+static std::string build_qwen3_prompt(const std::vector<ChatMessage>& messages) {
+    std::ostringstream oss;
+    for (const auto& msg : messages) {
+        oss << "<|im_start|>" << msg.role << "\n" << msg.content << "<|im_end|>\n";
+    }
+    // 以 assistant 头结尾，引导模型生成回复
+    oss << "<|im_start|>assistant\n";
+    return oss.str();
+}
+
+/**
+ * @brief 根据模型类型构建对话 prompt
+ */
+static std::string build_prompt(base::ModelType model_type,
+                                const std::vector<ChatMessage>& messages) {
+    switch (model_type) {
+        case base::ModelType::kModelTypeQwen3:
+            return build_qwen3_prompt(messages);
+        case base::ModelType::kModelTypeLLaMA3:
+            return build_llama3_prompt(messages);
+        default:
+            return build_llama2_prompt(messages);
+    }
+}
+
 // ----------------------------------------------------------------------------------
 // 辅助函数
 // ----------------------------------------------------------------------------------
@@ -136,7 +190,7 @@ int main(int argc, char** argv) {
     // ------------------------------------------------------------------
     // 解析参数
     // ------------------------------------------------------------------
-    std::string model_name = "llama3";
+    std::string model_name = "qwen3";
     bool is_quant = false;
     for (int i = 1; i < argc - 1; ++i) {
         if (std::string(argv[i]) == "--model") model_name = argv[i + 1];
@@ -144,7 +198,6 @@ int main(int argc, char** argv) {
             is_quant = true;
     }
     auto preset = get_preset(model_name, is_quant);
-    bool is_llama3 = (preset.model_type == base::ModelType::kModelTypeLLaMA3);
 
     // ------------------------------------------------------------------
     // 1. 加载模型
@@ -155,15 +208,15 @@ int main(int argc, char** argv) {
     print_separator();
     std::cout << "  Model: " << model_name << " (" << (is_quant ? "int8" : "fp32") << ")"
               << std::endl;
-    if (is_llama3) {
+    if (preset.model_type == base::ModelType::kModelTypeLLaMA3) {
         std::cout << "  Note: Requires Instruct model (Llama-3.2-1B-Instruct)" << std::endl;
+    } else if (preset.model_type == base::ModelType::kModelTypeQwen3) {
+        std::cout << "  Note: Using Qwen3-0.6B model" << std::endl;
     }
 
     std::cout << "  Loading model..." << std::flush;
     FLAGS_minloglevel = 0;
-    auto model =
-        std::make_unique<model::LLamaModel>(preset.tokenizer_type, preset.model_type,
-                                            preset.token_path, preset.model_path, preset.is_quant);
+    auto model = create_model(preset);
     model->init(base::DeviceType::kDeviceCUDA);
     FLAGS_minloglevel = 1;
     std::cout << " done" << std::endl;
@@ -241,8 +294,7 @@ int main(int argc, char** argv) {
         history.push_back({"user", user_input});
 
         // 构建完整 prompt
-        std::string prompt =
-            is_llama3 ? build_llama3_prompt(history) : build_llama2_prompt(history);
+        std::string prompt = build_prompt(preset.model_type, history);
 
         // 提交请求
         auto t_submit = std::chrono::high_resolution_clock::now();
