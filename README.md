@@ -17,11 +17,14 @@ NanoInfer is a minimal yet functional inference framework designed to explore an
 
 ### 🤖 Model Support
 
-| Model | Size | FP32 | W8A32 INT8 | Tokenizer | Chat Template |
-|-------|------|:----:|:----------:|-----------|:-------------:|
-| TinyLlama 1.1B | 1.1B | ✅ | ✅ | SentencePiece | ❌ |
-| LLaMA 3.2 1B | 1B | ✅ | ✅ | tiktoken (BPE) | ❌ |
-| LLaMA 3.2 1B Instruct | 1B | ✅ | ✅ | tiktoken (BPE) | ✅ |
+| Model | Backend | FP32 | W8A32 INT8 |
+|-------|:-------:|:----:|:----------:|
+| TinyLlama (LLaMA 2) | CPU | ✅ | ❌ |
+| | GPU | ✅ | ✅ |
+| LLaMA 3.2 | CPU | ✅ | ❌ |
+| | GPU | ✅ | ✅ |
+| Qwen3 0.6B | CPU | ✅ | ❌ |
+| | GPU | ✅ | ❌ |
 
 > 📦 Unified export tooling: `tools/export_models.sh` — download from HuggingFace → convert to custom binary format
 
