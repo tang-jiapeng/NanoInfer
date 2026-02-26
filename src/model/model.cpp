@@ -184,6 +184,12 @@ base::Status Model::generate_model_infos(const ModelConfig& config) const {
         config_->is_shared_weight_ = false;
     }
 
+    // Qwen3: lm_head 独立存储（非共享），write_bin.py 同时写入 embed_tokens 和 lm_head，
+    // 但 vocab_size 为正数，不能靠符号判断，必须强制覆盖。
+    if (model_type_ == base::ModelType::kModelTypeQwen3) {
+        config_->is_shared_weight_ = false;
+    }
+
     config_->vocab_size_ = std::abs(config.vocab_size);
     return base::error::Success();
 }
